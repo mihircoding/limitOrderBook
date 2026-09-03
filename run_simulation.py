@@ -20,7 +20,7 @@ import pandas as pd
 
 from src.order import Side
 from src.orderbook import LimitOrderBook
-from src.simulator import seed_book, simulate
+from src.simulator import hurst_exponent, impact_exponent, seed_book, simulate
 
 N_EVENTS = 50_000
 SEED = 7
@@ -75,9 +75,10 @@ def main() -> None:
         print(f"{str(bucket):>14} {row['mean']:>17.6f} {int(row['count']):>8,}")
 
     # fit impact ~ a * qty^b on the bucket means; b < 1 means concave impact
+    b_exp = impact_exponent(result["impacts"])
     x = np.log(np.array([b.mid for b in table.index], dtype=float))
     y = np.log(table["mean"].values)
-    b_exp, log_a = np.polyfit(x, y, 1)
+    log_a = np.polyfit(x, y, 1)[1]
     print(f"\npower-law fit: impact ~ size^{b_exp:.2f}")
     print("Exponent below 1 means CONCAVE impact - doubling the order size costs")
     print("less than double. Real markets sit nearer 0.5 (square-root impact);")
@@ -100,7 +101,8 @@ def main() -> None:
 
     # var(k) ~ k^(2H): H = 0.5 is a random walk, H < 0.5 is mean-reverting
     slope = np.polyfit(np.log(ks_all), np.log(var_ratios), 1)[0]
-    print(f"\nfitted scaling: var ~ k^{slope:.2f}  ->  Hurst exponent H = {slope / 2:.2f}")
+    H = hurst_exponent(result["mids"], ks_all)
+    print(f"\nfitted scaling: var ~ k^{slope:.2f}  ->  Hurst exponent H = {H:.2f}")
     print("(H = 0.50 is a pure random walk; H < 0.50 is mean-reverting)")
     print("\nA pure random walk doubles its variance when you double the horizon,")
     print("so the last two columns would match. They do not: variance grows more")

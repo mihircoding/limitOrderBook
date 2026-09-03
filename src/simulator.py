@@ -110,3 +110,39 @@ def simulate(book: LimitOrderBook, n_events: int = 5000, seed: int = 0) -> dict:
 
     return {"mids": mids, "spreads": spreads, "n_trades": n_trades,
             "volume": volume, "impacts": impacts}
+
+
+def impact_exponent(impacts: list[tuple[int, float]],
+                    buckets=(0, 50, 100, 150, 200)) -> float:
+    """Power-law fit impact ~ size^b from (order size, |mid move|) pairs.
+
+    b < 1 is concave (sublinear) impact - the stylized fact in RESULTS.md
+    section 3. Bucketing before the log-log fit matches what run_simulation.py
+    reports, so this is the same number, just made reusable for a test.
+    """
+    import numpy as np
+    import pandas as pd
+
+    df = pd.DataFrame(impacts, columns=["qty", "impact"])
+    df["bucket"] = pd.cut(df["qty"], buckets)
+    table = df.groupby("bucket", observed=True)["impact"].mean()
+    x = np.log(np.array([b.mid for b in table.index], dtype=float))
+    y = np.log(table.values)
+    slope, _ = np.polyfit(x, y, 1)
+    return float(slope)
+
+
+def hurst_exponent(mids: list[float],
+                   horizons=(1, 2, 4, 8, 16, 32, 64, 128)) -> float:
+    """Fit var(mid[t+k] - mid[t]) ~ k^(2H) across horizons k.
+
+    H = 0.5 is a pure random walk, H < 0.5 is mean-reverting (sub-diffusive)
+    - the stylized fact in RESULTS.md section 4.
+    """
+    import numpy as np
+
+    m = np.asarray(mids, dtype=float)
+    var1 = np.var(m[1:] - m[:-1])
+    ratios = [np.var(m[k:] - m[:-k]) / var1 for k in horizons]
+    slope, _ = np.polyfit(np.log(horizons), np.log(ratios), 1)
+    return float(slope / 2)
