@@ -8,7 +8,7 @@ strategy at all. The book still produces a realistic spread distribution, concav
 and a mid price that mean-reverts at short horizons exactly the way real equity data does. None
 of those were programmed in. They're properties of the matching rules.
 
-17 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
+30 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
 
 ```bash
 pip install -r requirements.txt
@@ -142,7 +142,7 @@ What it produced over 50,000 events (details and numbers in [RESULTS.md](RESULTS
 │   ├── order.py         # Order and Trade types, tick rounding
 │   ├── orderbook.py     # the matching engine
 │   └── simulator.py     # zero-intelligence order flow
-└── tests/               # 17 tests, written as matching scenarios
+└── tests/               # 30 tests, written as matching scenarios
 ```
 
 `tests/test_orderbook.py` is worth reading as the specification — each test is one rule of the
@@ -163,10 +163,17 @@ what real venues use for sequencing.
 **`Order` is mutable, `Trade` is frozen.** An order's remaining quantity changes as it fills;
 a trade is a historical fact and must never change after it prints.
 
+**IOC and FOK reuse `_match`, not a copy of it.** `add_ioc_order` is a limit order that skips
+`_rest` - same crossing rules, it just discards whatever doesn't fill instead of resting it.
+`add_fok_order` is the one order type that has to look before it leaps: `_match` mutates the
+book as it walks it, so there's no undoing a partial fill if the size comes up short. It checks
+the fillable quantity within the limit price read-only first, and only calls `_match` if that
+clears the requested size.
+
 ## Known simplifications
 
 - Single symbol, single venue. No cross-venue routing, no NBBO, no Reg NMS.
-- No order types beyond limit and market: no stops, icebergs, IOC/FOK, pegged, or
+- No order types beyond limit, market, IOC, and FOK: no stops, icebergs, pegged, or
   auction-only orders.
 - No opening or closing auction — a large share of real daily volume trades in exactly those,
   under different rules (a single clearing price, not continuous matching).

@@ -72,6 +72,59 @@ class LimitOrderBook:
 
         return order.order_id, trades
 
+    # ---------- IOC / FOK ----------
+
+    def add_ioc_order(self, side: Side, price: float, quantity: int) -> list[Trade]:
+        """Immediate-Or-Cancel: match whatever crosses right now, discard the
+        rest. Same matching rules as a limit order (price improvement, maker
+        priority, FIFO at a level) minus the one thing that makes a limit
+        order a limit order - it never rests. A marketable IOC behaves exactly
+        like a limit order that happened to fully fill; the only observable
+        difference is what happens to the leftover when it doesn't.
+
+        Used for "take what's there, don't leave a resting order that could
+        get picked off a moment later" - the practical reason a trader
+        reaches for IOC instead of a plain limit order.
+        """
+        order = Order(order_id=self._next_id, side=side, price=price,
+                      quantity=quantity, timestamp=self._next_ts)
+        self._next_id += 1
+        self._next_ts += 1
+        return self._match(order, limit_price=order.price)
+
+    def add_fok_order(self, side: Side, price: float, quantity: int) -> list[Trade]:
+        """Fill-Or-Kill: the whole order fills immediately at this price or
+        better, or none of it does - no partial fills, nothing rests.
+
+        The one order type here where checking-before-acting matters: _match
+        mutates the book as it goes (decrements resting quantity, pops filled
+        orders), so it cannot be run speculatively and then undone if the
+        total turns out short. _fillable_quantity walks the same price levels
+        read-only first; only if it clears the requested size does _match
+        actually run.
+        """
+        book = self.asks if side is Side.BUY else self.bids
+        available = self._fillable_quantity(book, side, price)
+        if available < quantity:
+            return []
+
+        order = Order(order_id=self._next_id, side=side, price=price,
+                      quantity=quantity, timestamp=self._next_ts)
+        self._next_id += 1
+        self._next_ts += 1
+        trades = self._match(order, limit_price=order.price)
+        assert order.quantity == 0, "fillable_quantity said this would fully fill"
+        return trades
+
+    def _fillable_quantity(self, book: dict, side: Side, limit_price: float) -> int:
+        """How much of `book` is reachable at `limit_price` or better, without
+        touching anything. Read-only twin of the crossing check inside
+        _match - same price condition, no mutation, no side effects.
+        """
+        crossing_prices = [p for p in book if
+                           (p <= limit_price if side is Side.BUY else p >= limit_price)]
+        return sum(o.quantity for p in crossing_prices for o in book[p])
+
     # ---------- market orders and cancels ----------
 
     def market_order(self, side: Side, quantity: int) -> list[Trade]:
