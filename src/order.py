@@ -22,17 +22,35 @@ class Side(Enum):
     SELL = "SELL"
 
 
+class StpPolicy(Enum):
+    """What to do when an incoming order would trade against a resting order
+    from the same participant_id. See LimitOrderBook._match for where this
+    actually gets applied — it's a look-before-you-cross check, not a
+    post-trade cleanup, because a trade that already printed can't be
+    un-printed."""
+
+    CANCEL_RESTING = "CANCEL_RESTING"  # pull the maker's resting order; the taker keeps matching
+    CANCEL_NEWEST = "CANCEL_NEWEST"    # kill the whole incoming order the instant it would self-match
+
+
 @dataclass
 class Order:
     """A limit order. `quantity` is mutated as the order fills — the remaining
     (unfilled) size. `timestamp` is a simple int sequence number: lower = older,
-    which is all time priority needs."""
+    which is all time priority needs.
+
+    participant_id is optional and defaults to None, which means "don't run
+    self-trade prevention for this order" — every existing caller that never
+    passes one keeps matching against its own resting orders exactly as
+    before. Pass the same participant_id on two orders and the book will
+    refuse to cross them; see StpPolicy for how."""
 
     order_id: int
     side: Side
     price: float
     quantity: int
     timestamp: int
+    participant_id: str | None = None
 
     def __post_init__(self):
         self.price = to_tick(self.price)

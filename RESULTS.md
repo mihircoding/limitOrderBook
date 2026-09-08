@@ -1,6 +1,6 @@
 # Results
 
-All 17 tests pass (`python -m pytest -q`). Numbers below are `python run_simulation.py`:
+All 42 tests pass (`python -m pytest -q`). Numbers below are `python run_simulation.py`:
 50,000 events, seed 7, book seeded with 5 levels of 100 shares either side of 100.00.
 
 ```
@@ -148,6 +148,9 @@ reads as the specification:
 - No opening/closing auction, which is where a large share of real volume actually trades, under
   entirely different rules.
 - No latency, so nothing in this project touches the actual subject of low-latency trading.
-- No fees, rebates, self-trade prevention, or risk checks.
+- No fees or rebates. Self-trade prevention exists now (`participant_id` + `StpPolicy` on every
+  order type - see README's Design notes and `tests/test_stp.py`), but no other risk checks
+  (position limits, fat-finger checks). The zero-intelligence simulator below still doesn't
+  assign participant identities to its agents, so none of the numbers below exercise it.
 - Agents have no memory, no inventory, and no information — which is exactly what makes it a
   valid null model, and exactly what makes the depth magnitudes wrong.

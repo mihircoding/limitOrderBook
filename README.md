@@ -8,11 +8,11 @@ strategy at all. The book still produces a realistic spread distribution, concav
 and a mid price that mean-reverts at short horizons exactly the way real equity data does. None
 of those were programmed in. They're properties of the matching rules.
 
-30 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
+42 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q          # 17 passed
+python -m pytest -q          # 42 passed
 python run_simulation.py     # 50k events, writes simulation.png
 ```
 
@@ -142,7 +142,7 @@ What it produced over 50,000 events (details and numbers in [RESULTS.md](RESULTS
 │   ├── order.py         # Order and Trade types, tick rounding
 │   ├── orderbook.py     # the matching engine
 │   └── simulator.py     # zero-intelligence order flow
-└── tests/               # 30 tests, written as matching scenarios
+└── tests/               # 42 tests, written as matching scenarios
 ```
 
 `tests/test_orderbook.py` is worth reading as the specification — each test is one rule of the
@@ -170,6 +170,19 @@ book as it walks it, so there's no undoing a partial fill if the size comes up s
 the fillable quantity within the limit price read-only first, and only calls `_match` if that
 clears the requested size.
 
+**Self-trade prevention is a look-before-you-cross check, not a cleanup.** Every order can
+carry an optional `participant_id` (default `None` - the book crosses two orders from the same
+untracked identity exactly like it always did, no behavior change for anyone who doesn't opt in).
+Pass a `participant_id` and `_match` refuses to print a trade against a resting order with the
+same one, one of two ways (`StpPolicy`): `CANCEL_RESTING` pulls the maker's order and the taker
+keeps matching everyone else; `CANCEL_NEWEST` kills the entire incoming order the instant it
+would self-match, nothing further fills or rests. The reason this can't be a post-trade check:
+once a `Trade` is appended it already happened - a matching engine can't un-print a fill any more
+than a real exchange can. FOK needed the most care here, for the same reason it did for the
+non-STP case: `_fillable_quantity` has to walk the book in the same price/time priority `_match`
+uses and apply the same self-trade rule while counting, or a FOK could fire and then discover
+mid-fill that some of what it counted was about to be cancelled instead of traded.
+
 ## Known simplifications
 
 - Single symbol, single venue. No cross-venue routing, no NBBO, no Reg NMS.
@@ -177,7 +190,8 @@ clears the requested size.
   auction-only orders.
 - No opening or closing auction — a large share of real daily volume trades in exactly those,
   under different rules (a single clearing price, not continuous matching).
-- No self-trade prevention, no fee/rebate model, no risk checks.
+- ~~No self-trade prevention~~ - `participant_id` + `StpPolicy` on every order type (see Design
+  notes). Still no fee/rebate model, no other risk checks (position limits, fat-finger checks).
 - No latency. Every order arrives instantly and in submission order, which erases the entire
   subject matter of low-latency trading.
 - Zero-intelligence agents never reprice, so passive orders pile up far from the touch in a way

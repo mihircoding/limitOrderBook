@@ -18,7 +18,7 @@ That is a profiling-driven optimization, not where you start.
 
 from collections import deque
 
-from .order import Order, Side, Trade
+from .order import Order, Side, StpPolicy, Trade
 
 
 class LimitOrderBook:
@@ -52,20 +52,33 @@ class LimitOrderBook:
 
     # ---------- limit orders ----------
 
-    def add_limit_order(self, side: Side, price: float, quantity: int) -> tuple[int, list[Trade]]:
+    def add_limit_order(self, side: Side, price: float, quantity: int,
+                        participant_id: str | None = None,
+                        stp_policy: StpPolicy = StpPolicy.CANCEL_RESTING
+                        ) -> tuple[int, list[Trade]]:
         """Submit a limit order. Returns (order_id, trades).
 
         Marketable size is matched first, and whatever survives rests in the book.
         A limit order is therefore not a distinct object from a market order —
         it is a market order with a price floor, and this method is that floor
         plus _match().
+
+        participant_id / stp_policy: opt-in self-trade prevention. Leave
+        participant_id as None (the default) and this behaves exactly as
+        before — the book will happily cross two orders from the same trader,
+        which is realistic for a book with no concept of "trader" at all.
+        Pass a participant_id and _match() will refuse to print a trade
+        against that same id; see StpPolicy for the two ways it can refuse.
+        Under CANCEL_NEWEST the whole order can be killed before ever
+        resting, so the "rests" step below still checks order.quantity > 0.
         """
         order = Order(order_id=self._next_id, side=side, price=price,
-                      quantity=quantity, timestamp=self._next_ts)
+                      quantity=quantity, timestamp=self._next_ts,
+                      participant_id=participant_id)
         self._next_id += 1
         self._next_ts += 1
 
-        trades = self._match(order, limit_price=order.price)
+        trades = self._match(order, limit_price=order.price, stp_policy=stp_policy)
 
         if order.quantity > 0:
             self._rest(order)
@@ -74,7 +87,9 @@ class LimitOrderBook:
 
     # ---------- IOC / FOK ----------
 
-    def add_ioc_order(self, side: Side, price: float, quantity: int) -> list[Trade]:
+    def add_ioc_order(self, side: Side, price: float, quantity: int,
+                      participant_id: str | None = None,
+                      stp_policy: StpPolicy = StpPolicy.CANCEL_RESTING) -> list[Trade]:
         """Immediate-Or-Cancel: match whatever crosses right now, discard the
         rest. Same matching rules as a limit order (price improvement, maker
         priority, FIFO at a level) minus the one thing that makes a limit
@@ -85,14 +100,19 @@ class LimitOrderBook:
         Used for "take what's there, don't leave a resting order that could
         get picked off a moment later" - the practical reason a trader
         reaches for IOC instead of a plain limit order.
+
+        participant_id / stp_policy: see add_limit_order.
         """
         order = Order(order_id=self._next_id, side=side, price=price,
-                      quantity=quantity, timestamp=self._next_ts)
+                      quantity=quantity, timestamp=self._next_ts,
+                      participant_id=participant_id)
         self._next_id += 1
         self._next_ts += 1
-        return self._match(order, limit_price=order.price)
+        return self._match(order, limit_price=order.price, stp_policy=stp_policy)
 
-    def add_fok_order(self, side: Side, price: float, quantity: int) -> list[Trade]:
+    def add_fok_order(self, side: Side, price: float, quantity: int,
+                      participant_id: str | None = None,
+                      stp_policy: StpPolicy = StpPolicy.CANCEL_RESTING) -> list[Trade]:
         """Fill-Or-Kill: the whole order fills immediately at this price or
         better, or none of it does - no partial fills, nothing rests.
 
@@ -102,44 +122,75 @@ class LimitOrderBook:
         total turns out short. _fillable_quantity walks the same price levels
         read-only first; only if it clears the requested size does _match
         actually run.
+
+        participant_id / stp_policy: see add_limit_order. _fillable_quantity
+        has to know about both, because self-trade prevention changes how
+        much of the book is honestly reachable - liquidity behind your own
+        resting order either doesn't count at all (CANCEL_RESTING skips your
+        own orders and keeps walking past them) or stops counting the moment
+        it's reached (CANCEL_NEWEST would kill the whole order right there).
+        Getting this wrong would mean a FOK either fires and then partially
+        self-cancels mid-match (breaking the whole point of FOK) or rejects
+        an order that could actually have filled clean.
         """
         book = self.asks if side is Side.BUY else self.bids
-        available = self._fillable_quantity(book, side, price)
+        available = self._fillable_quantity(book, side, price, participant_id, stp_policy)
         if available < quantity:
             return []
 
         order = Order(order_id=self._next_id, side=side, price=price,
-                      quantity=quantity, timestamp=self._next_ts)
+                      quantity=quantity, timestamp=self._next_ts,
+                      participant_id=participant_id)
         self._next_id += 1
         self._next_ts += 1
-        trades = self._match(order, limit_price=order.price)
+        trades = self._match(order, limit_price=order.price, stp_policy=stp_policy)
         assert order.quantity == 0, "fillable_quantity said this would fully fill"
         return trades
 
-    def _fillable_quantity(self, book: dict, side: Side, limit_price: float) -> int:
+    def _fillable_quantity(self, book: dict, side: Side, limit_price: float,
+                           participant_id: str | None = None,
+                           stp_policy: StpPolicy = StpPolicy.CANCEL_RESTING) -> int:
         """How much of `book` is reachable at `limit_price` or better, without
         touching anything. Read-only twin of the crossing check inside
-        _match - same price condition, no mutation, no side effects.
+        _match - same price condition, no mutation, no side effects - and,
+        when participant_id is given, the same self-trade rule too: walked in
+        the exact price/time priority _match would use, since which orders
+        count depends on what's reached BEFORE the requested size is used up,
+        not just what's out there in total.
         """
-        crossing_prices = [p for p in book if
-                           (p <= limit_price if side is Side.BUY else p >= limit_price)]
-        return sum(o.quantity for p in crossing_prices for o in book[p])
+        crossing_prices = sorted(
+            (p for p in book if (p <= limit_price if side is Side.BUY else p >= limit_price)),
+            reverse=(side is Side.SELL),
+        )
+        total = 0
+        for price in crossing_prices:
+            for order in book[price]:  # deque is already FIFO / time-priority order
+                if participant_id is not None and order.participant_id == participant_id:
+                    if stp_policy is StpPolicy.CANCEL_NEWEST:
+                        return total  # would be killed on contact; nothing past here counts
+                    continue  # CANCEL_RESTING: this order gets pulled, not counted, keep walking
+                total += order.quantity
+        return total
 
     # ---------- market orders and cancels ----------
 
-    def market_order(self, side: Side, quantity: int) -> list[Trade]:
+    def market_order(self, side: Side, quantity: int, participant_id: str | None = None,
+                     stp_policy: StpPolicy = StpPolicy.CANCEL_RESTING) -> list[Trade]:
         """Fill against the opposite side until done or the book is empty.
 
         Any unfilled remainder is discarded: a market order has no price at which
         to rest. Real venues vary here (some convert the remainder to a limit at
         the last traded price), and it is worth knowing that is a venue rule, not
         a law of nature.
+
+        participant_id / stp_policy: see add_limit_order.
         """
         order = Order(order_id=self._next_id, side=side, price=0.0,
-                      quantity=quantity, timestamp=self._next_ts)
+                      quantity=quantity, timestamp=self._next_ts,
+                      participant_id=participant_id)
         self._next_id += 1
         self._next_ts += 1
-        return self._match(order, limit_price=None)
+        return self._match(order, limit_price=None, stp_policy=stp_policy)
 
     def cancel(self, order_id: int) -> bool:
         """Remove a resting order. False if already filled, cancelled, or unknown.
@@ -170,7 +221,8 @@ class LimitOrderBook:
 
     # ---------- matching internals ----------
 
-    def _match(self, incoming: Order, limit_price: float | None) -> list[Trade]:
+    def _match(self, incoming: Order, limit_price: float | None,
+              stp_policy: StpPolicy = StpPolicy.CANCEL_RESTING) -> list[Trade]:
         """Consume the opposite side while the incoming order still crosses.
 
         The ONLY place matching logic lives. A market order is this loop with
@@ -179,6 +231,13 @@ class LimitOrderBook:
 
         Priority is price first, then time: the best opposite price is picked each
         pass, and the deque's left end is the oldest order resting at it.
+
+        Self-trade prevention lives here too, as a check BEFORE a trade is
+        built, not a cleanup after: once a Trade is appended it's a fact that
+        happened, so the only place to refuse a self-match is right before
+        the fill math runs. incoming.participant_id is None (the default)
+        skips this entirely - two orders from the same untracked "no
+        participant" identity are still allowed to cross, same as always.
         """
         book = self.asks if incoming.side is Side.BUY else self.bids
         trades: list[Trade] = []
@@ -194,6 +253,22 @@ class LimitOrderBook:
 
             queue = book[best]
             resting = queue[0]
+
+            if (incoming.participant_id is not None
+                    and resting.participant_id == incoming.participant_id):
+                if stp_policy is StpPolicy.CANCEL_NEWEST:
+                    # Kill the whole incoming order right here - it never
+                    # rests either (add_limit_order checks quantity > 0).
+                    incoming.quantity = 0
+                    break
+                # CANCEL_RESTING: pull the resting order, no trade, keep
+                # trying to match the incoming order against everyone else.
+                queue.popleft()
+                self._by_id.pop(resting.order_id, None)
+                if not queue:
+                    del book[best]
+                continue
+
             fill = min(incoming.quantity, resting.quantity)
 
             # Printed at the MAKER's price. The taker crossed the spread and gets
