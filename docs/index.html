@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Limit Order Book & Matching Engine — Mihir Konda</title>
+<meta name="description" content="A price-time priority matching engine plus 50,000 events of zero-intelligence order flow. Realistic spreads, concave price impact and a mean-reverting mid emerge from the matching rules alone.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#fbfbfa; --surface:#fff; --line:#e5e4df; --line2:#d0cfc8;
+  --ink:#16161a; --ink2:#55554f; --ink3:#8b8a83;
+  --blue:#2a6fd6; --green:#12946a; --red:#d0413f; --amber:#b3760a;
+  --blue-bg:#eaf2fc; --green-bg:#e6f4ee; --red-bg:#fcecec; --amber-bg:#fdf3e3;
+  --radius:10px; --max:1120px;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#141414;--surface:#1c1c1b;--line:#2e2e2c;--line2:#3d3d3a;
+  --ink:#f2f2ef;--ink2:#b8b7b0;--ink3:#87867f;
+  --blue:#5b9bf0;--green:#3fbf90;--red:#ef6a68;--amber:#dfa03c;
+  --blue-bg:#17263a;--green-bg:#122a22;--red-bg:#331a1a;--amber-bg:#332715;}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
+.wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.88em}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+h1{font-size:38px;line-height:1.15;font-weight:600;letter-spacing:-.02em;margin:0 0 12px}
+h2{font-size:25px;font-weight:600;letter-spacing:-.015em;margin:0 0 6px}
+h3{font-size:17px;font-weight:600;margin:0 0 8px}
+p{margin:0 0 14px;color:var(--ink2)}
+section{padding:46px 0;border-top:1px solid var(--line)}
+.lede{font-size:18px;color:var(--ink2);max-width:70ch}
+.eyebrow{font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--ink3);margin-bottom:10px}
+header{padding:60px 0 46px}
+.tagline{display:inline-block;font-size:12.5px;font-weight:500;padding:4px 11px;border-radius:99px;
+  background:var(--red-bg);color:var(--red);margin-bottom:18px}
+.links{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:8px 15px;border-radius:8px;
+  border:1px solid var(--line2);color:var(--ink);font-size:14px;font-weight:500;background:var(--surface)}
+.btn:hover{border-color:var(--ink3);text-decoration:none}
+.btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin:26px 0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:15px 17px}
+.card .k{font-size:12px;color:var(--ink3);margin-bottom:5px;font-weight:500}
+.card .v{font-size:29px;font-weight:600;letter-spacing:-.02em;line-height:1.05}
+.card .s{font-size:12.5px;color:var(--ink3);margin-top:5px}
+.v.red{color:var(--red)} .v.green{color:var(--green)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px}
+.chart{position:relative;height:210px;margin-top:4px}
+.cap{font-size:13px;color:var(--ink3);line-height:1.6;margin-top:10px}
+.note{border-left:3px solid var(--amber);background:var(--amber-bg);padding:13px 16px;border-radius:0 8px 8px 0;margin:18px 0}
+.note.blue{border-color:var(--blue);background:var(--blue-bg)}
+.note p{margin:0;color:var(--ink);font-size:14.5px}
+.note p+p{margin-top:9px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;font-weight:600;color:var(--ink2);padding:9px 10px;border-bottom:1px solid var(--line2);
+  white-space:nowrap;font-size:12.5px}
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--ink)}
+td{padding:8px 10px;border-bottom:1px solid var(--line);color:var(--ink2)}
+td.n{text-align:right;font-family:"JetBrains Mono",monospace;font-size:12.5px}
+td strong{color:var(--ink);font-weight:600}
+.pos{color:var(--green)} .neg{color:var(--red)}
+.pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:99px;background:var(--blue-bg);color:var(--blue);font-weight:500}
+.pill.grey{background:var(--line);color:var(--ink3)}
+.ctl{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin-bottom:16px}
+.ctl label{display:block;font-size:12px;color:var(--ink3);margin-bottom:5px;font-weight:500}
+select,input[type=search]{padding:7px 10px;border:1px solid var(--line2);border-radius:7px;
+  background:var(--surface);color:var(--ink);font-size:13.5px;font-family:inherit}
+.slider{min-width:150px}
+.slider .row{display:flex;justify-content:space-between;font-size:12px;color:var(--ink3);margin-bottom:4px;font-weight:500}
+.slider .row b{color:var(--ink);font-family:"JetBrains Mono",monospace}
+input[type=range]{width:100%;accent-color:var(--blue)}
+.scroll{overflow-x:auto}
+.pager{display:flex;gap:8px;align-items:center;margin-top:14px;font-size:13px;color:var(--ink3)}
+.pager button{padding:5px 11px;border:1px solid var(--line2);background:var(--surface);color:var(--ink);
+  border-radius:6px;cursor:pointer;font-size:13px;font-family:inherit}
+.pager button:disabled{opacity:.4;cursor:default}
+ul{color:var(--ink2);padding-left:20px;margin:0 0 14px}
+li{margin-bottom:7px}
+footer{padding:36px 0 56px;border-top:1px solid var(--line);color:var(--ink3);font-size:13.5px}
+@media(max-width:860px){.grid2{grid-template-columns:1fr}h1{font-size:30px}}
+</style>
+
+<style>
+button.btn{cursor:pointer;font-family:inherit}
+button.btn.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.ladder{font-family:"JetBrains Mono",monospace;font-size:12.5px;margin-top:4px}
+.lvl{display:grid;grid-template-columns:62px 66px 1fr;align-items:center;gap:8px;padding:1.5px 0;position:relative}
+.lvl .px{text-align:right;font-weight:500}
+.lvl .qt{text-align:right;color:var(--ink3)}
+.lvl .bar{height:13px;border-radius:2px;opacity:.5}
+.lvl.ask .px{color:var(--red)} .lvl.ask .bar{background:var(--red)}
+.lvl.bid .px{color:var(--green)} .lvl.bid .bar{background:var(--green)}
+.lvl.flash .bar{opacity:1}
+.midrow{display:flex;justify-content:space-between;align-items:center;margin:7px 0;padding:5px 8px;
+  border-top:1px dashed var(--line2);border-bottom:1px dashed var(--line2);
+  font-size:11.5px;color:var(--ink3);letter-spacing:.04em;text-transform:uppercase}
+.bookstats{display:flex;gap:16px;flex-wrap:wrap;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+  font-size:12.5px;color:var(--ink3)}
+.bookstats b{color:var(--ink);font-family:"JetBrains Mono",monospace;font-weight:500}
+input[type=number]{padding:7px 10px;border:1px solid var(--line2);border-radius:7px;
+  background:var(--surface);color:var(--ink);font-size:13.5px;font-family:inherit}
+</style>
+</head>
+<body>
+
+<header>
+<div class="wrap">
+  <div class="tagline">The agents flip coins. The market looks real anyway.</div>
+  <h1>Limit Order Book &amp; Matching Engine</h1>
+  <p class="lede">A price-time priority matching engine — the piece of infrastructure that <em>is</em> a modern exchange — plus a zero-intelligence order flow simulator to run through it. <strong style="color:var(--ink)">The agents have no strategy at all. The book still produces a realistic spread distribution, concave price impact, and a mid price that mean-reverts at short horizons exactly the way real tick data does.</strong> None of that was programmed in.</p>
+  <div class="links">
+    <a class="btn primary" href="#demo">Trade against the book</a>
+    <a class="btn" href="https://github.com/mihircoding/limitOrderBook">Source on GitHub</a>
+    <a class="btn" href="https://github.com/mihircoding/limitOrderBook/blob/main/RESULTS.md">Full write-up</a>
+  </div>
+</div>
+</header>
+
+<section>
+<div class="wrap">
+  <div class="eyebrow">Mechanics</div>
+  <h2>How a matching engine works</h2>
+  <p class="lede">An order book is two sorted collections of resting limit orders — bids below, asks above — and the gap between the best of each is the spread. Everything else is bookkeeping.</p>
+
+  <div class="grid2">
+    <div>
+      <h3>Price-time priority</h3>
+      <p>The rule almost every equity venue uses to decide who fills first:</p>
+      <ul>
+        <li><strong style="color:var(--ink)">Price priority</strong> — better prices execute first. A 100.50 bid always fills before a 100.45 bid, regardless of who arrived first.</li>
+        <li><strong style="color:var(--ink)">Time priority</strong> — among orders at the same price, first in fills first.</li>
+      </ul>
+      <p>Time priority at a price level is why a <span class="mono">deque</span> per level is the natural structure: append to the back on arrival, pop from the front when filling. <strong style="color:var(--ink)">The queue is the priority.</strong></p>
+      <p>Which is why <em>queue position is a tradable asset</em>. If you're 5,000 shares deep at the best bid and only 3,000 trade there before the price moves, you don't get filled at all. Market makers spend real effort getting to the front and staying there — which is also why most cancels in real markets aren't changes of mind, they're repositioning.</p>
+    </div>
+    <div>
+      <h3>Three details worth getting right</h3>
+      <p><strong style="color:var(--ink)">Trades print at the maker's price.</strong> A resting sell at 101.00 meets an incoming buy willing to pay 101.50 — the trade prints at 101.00 and the buyer gets price improvement. The whole maker/taker economic model rests on this. Get it backwards and you've inverted the incentive structure of the entire venue.</p>
+      <p><strong style="color:var(--ink)">A market order is a limit order without the price condition.</strong> Both go through one <span class="mono">_match()</span> loop; the only difference is whether a price ceiling is checked. Keeping matching in exactly one place is what stops the two paths from silently disagreeing.</p>
+      <p><strong style="color:var(--ink)">Maker or taker is a property of the fill, not the order.</strong> A 500-share buy that clears a 300-share ask took liquidity for 300 and then <em>became</em> the passive side with the remaining 200.</p>
+    </div>
+  </div>
+</div>
+</section>
+
+<section id="demo">
+<div class="wrap">
+  <div class="eyebrow">Interactive</div>
+  <h2>Trade against the engine</h2>
+  <p class="lede">The matching engine below is a direct port of <span class="mono">src/orderbook.py</span> — same price-time priority, same maker pricing, same partial-fill handling. Send it orders and watch the book respond. Nothing is simulated on a server; this is the algorithm running in your browser.</p>
+
+  <div class="grid2" style="grid-template-columns:1.15fr 1fr;align-items:start">
+    <div class="panel">
+      <h3>Order book</h3>
+      <div id="ladder" class="ladder"></div>
+      <div class="bookstats">
+        <span>best bid <b id="d-bid">—</b></span>
+        <span>best ask <b id="d-ask">—</b></span>
+        <span>spread <b id="d-spread">—</b></span>
+        <span>mid <b id="d-mid">—</b></span>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h3>Send an order</h3>
+        <div class="ctl" style="margin-bottom:12px">
+          <div><label>Side</label>
+            <select id="i-side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select></div>
+          <div><label>Type</label>
+            <select id="i-type">
+              <option value="LIMIT">Limit</option>
+              <option value="MARKET">Market</option>
+              <option value="IOC">IOC</option>
+              <option value="FOK">FOK</option>
+            </select></div>
+          <div id="w-price"><label>Price</label>
+            <input type="number" id="i-price" step="0.01" value="100.05" style="width:92px"></div>
+          <div><label>Quantity</label>
+            <input type="number" id="i-qty" step="10" min="1" value="200" style="width:82px"></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn primary" id="b-send">Send order</button>
+          <button class="btn" id="b-flow">Run 200 random events</button>
+          <button class="btn" id="b-reset">Reset book</button>
+        </div>
+        <p class="cap" id="d-result">The book is seeded with five levels either side of 100.00. A marketable order walks the opposite side in price order; whatever doesn't fill rests, unless you sent IOC or FOK.</p>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <h3>Trade tape</h3>
+        <div class="scroll" style="max-height:214px;overflow-y:auto">
+          <table id="t-tape"><thead><tr><th>Price</th><th class="n">Qty</th><th class="n">Maker</th><th class="n">Taker</th></tr></thead><tbody></tbody></table>
+        </div>
+        <p class="cap" id="d-tape-note">No trades yet. Send a marketable order — a buy at or above the best ask, or just a market order.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="note blue">
+    <p><strong>Things worth trying.</strong> Send a <em>buy limit at 100.20</em> for 900 shares: it sweeps several ask levels in price order, each fill printing at that level's price, and the remainder rests as the new best bid. Send the same as <em>FOK</em> and it either fills whole or vanishes without touching the book. Send it as <em>IOC</em> and it takes what's there and throws the rest away.</p>
+  </div>
+</div>
+</section>
+
+<section>
+<div class="wrap">
+  <div class="eyebrow">The simulator</div>
+  <h2>Zero intelligence, and why that's the point</h2>
+  <p class="lede">Gode &amp; Sunder (1993) showed that traders submitting random orders with no strategy whatsoever reproduce most of a real market's aggregate behavior. The realism lives in the exchange rules, not in the traders.</p>
+
+  <div class="cards">
+    <div class="card"><div class="k">Events simulated</div><div class="v" id="m-events">—</div><div class="s">60% limit · 25% market · 15% cancel</div></div>
+    <div class="card"><div class="k">Trades executed</div><div class="v" id="m-trades">—</div><div class="s" id="m-volume">—</div></div>
+    <div class="card"><div class="k">Mean spread</div><div class="v" id="m-spread">—</div><div class="s">never specified anywhere in the code</div></div>
+    <div class="card"><div class="k">Time at 1-tick spread</div><div class="v" id="m-tight">—</div><div class="s">a hard floor with a long right tail</div></div>
+  </div>
+
+  <div class="note">
+    <p><strong>This is a null model, and that is its entire value.</strong> Any stylized fact it reproduces needs no behavioral explanation — you cannot claim your favourite market phenomenon reveals something about trader psychology if a book full of coin-flippers produces it too.</p>
+  </div>
+</div>
+</section>
+
+<section>
+<div class="wrap">
+  <div class="eyebrow">Emergent results</div>
+  <h2>Four things nobody programmed in</h2>
+
+  <div class="grid2">
+    <div class="panel">
+      <h3>1. A spread distribution</h3>
+      <div class="chart"><canvas id="c-spread"></canvas></div>
+      <p class="cap">The spread is an equilibrium between two forces the simulator <em>does</em> specify: market orders eat depth at the touch, passive limit orders replace it. When consumption outruns replacement the touch empties and the spread widens; when replacement wins, someone posts inside and it collapses back to one tick. If you'd only ever seen this output you might reach for an explanation involving market makers managing inventory and adverse selection. There are no market makers here. There is no inventory. There is no information.</p>
+    </div>
+    <div class="panel">
+      <h3>2. A hump-shaped depth profile</h3>
+      <div class="chart"><canvas id="c-depth"></canvas></div>
+      <p class="cap"><strong style="color:var(--ink)">This is the least realistic output here, and the reason is instructive.</strong> Zero-intelligence agents never reprice. A real trader who posts three ticks away and watches the market leave pulls the order and reposts; here it sits until a random cancel happens to select it. The <em>shape</em> is emergent; the <em>magnitude</em> is an artifact. Distinguishing those two is the entire skill in reading a simulation.</p>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:26px">
+    <div class="panel">
+      <h3>3. Concave price impact</h3>
+      <div class="chart"><canvas id="c-impact"></canvas></div>
+      <p class="cap">Bigger orders move the price more — obviously — but <strong style="color:var(--ink)">sublinearly</strong>: impact scales as size<sup id="x-exp">—</sup>. Doubling the order size costs less than double the impact. That concavity is one of the most robust empirical facts in market microstructure, and here it emerges from nothing but walking a book with a hump-shaped depth profile. Real markets sit closer to square-root (exponent ≈ 0.5); the gap is the depth profile again.</p>
+    </div>
+    <div class="panel">
+      <h3>4. A mid that is not a random walk</h3>
+      <div class="chart"><canvas id="c-var"></canvas></div>
+      <p class="cap">A random walk's variance grows linearly with the horizon — double the time, double the variance. This doesn't: at k=128 the variance is only ~22&times; the one-step variance, not 128&times;. Fitted scaling gives a Hurst exponent of <b id="x-hurst">—</b> against 0.50 for a true random walk, with lag-1 autocorrelation of <b id="x-acf">—</b>. <strong style="color:var(--ink)">The mid mean-reverts at short horizons.</strong></p>
+    </div>
+  </div>
+
+  <div class="note">
+    <p><strong>The most useful result here is a warning.</strong> Real tick data shows this same signature, and a naive reading says "the mid mean-reverts, therefore buy dips at the tick level." But you cannot trade the mid — you buy at the ask and sell at the bid. The mean reversion here is about 0.001 per event against a mean spread of 0.0198. <strong>The signal is roughly twenty times smaller than the cost of acting on it.</strong></p>
+    <p>Two mechanisms produce it, both purely mechanical: <em>bid-ask bounce</em> (the mid ticks up when the best ask is consumed and down when the best bid is, alternating roughly at random) and <em>the restoring force of resting depth</em> (a market buy that lifts the touch leaves a thinner ask and a fatter bid behind it). If your alpha model finds mean reversion at the tick level, you have probably rediscovered bid-ask bounce. Test against a zero-intelligence null before believing otherwise.</p>
+  </div>
+</div>
+</section>
+
+<section>
+<div class="wrap">
+  <div class="eyebrow">Honesty</div>
+  <h2>What isn't modeled</h2>
+  <div class="grid2">
+    <div>
+      <ul>
+        <li>Single symbol, single venue. No routing, no NBBO, no Reg NMS.</li>
+        <li>Order types stop at limit, market, IOC and FOK — no stops, icebergs, pegged or auction-only orders.</li>
+        <li>No opening or closing auction, where a large share of real daily volume actually trades, under entirely different rules.</li>
+      </ul>
+    </div>
+    <div>
+      <ul>
+        <li><strong style="color:var(--ink)">No latency.</strong> Every order arrives instantly and in submission order, which erases the entire subject matter of low-latency trading.</li>
+        <li>Self-trade prevention exists (participant IDs, two cancellation policies); fees, rebates and other risk checks don't.</li>
+        <li>Agents have no memory, inventory or information — which is exactly what makes it a valid null model, and exactly what makes the depth magnitudes wrong.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</section>
+
+<footer>
+<div class="wrap">
+  <p style="margin-bottom:10px">Built by <a href="https://github.com/mihircoding">Mihir Konda</a> — every number on this page is generated by <span class="mono">docs/build_data.py</span> from the code in <a href="https://github.com/mihircoding/limitOrderBook">the repository</a>, not typed in by hand.</p>
+  <p style="margin:0;font-size:13px">Quant projects: <a href="https://mihircoding.github.io/backtestingEngine/">Backtesting Engine</a> · <strong style="color:var(--ink2)">Order Book</strong> · <a href="https://mihircoding.github.io/pairsTrading/">Pairs Trading</a> · <a href="https://mihircoding.github.io/options-pricer/">Options Pricer</a> · <a href="https://mihircoding.github.io/portfolioOptimization/">Portfolio Optimization</a></p>
+</div>
+</footer>
+
+<script src="data.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+const D = window.DATA;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const C = () => ({ink:css('--ink'), ink2:css('--ink2'), ink3:css('--ink3'), line:css('--line'),
+                  blue:css('--blue'), green:css('--green'), red:css('--red'), amber:css('--amber')});
+Chart.defaults.font.family = "Inter, sans-serif";
+Chart.defaults.font.size = 11;
+Chart.defaults.animation = false;
+
+/* ------------------------------------------------------------------
+   Matching engine — a direct port of src/orderbook.py.
+
+   Same structure: a map of price -> FIFO queue of resting orders per
+   side, one _match() loop that both limit and market orders go through,
+   trades printed at the MAKER's price. Kept deliberately close to the
+   Python so the two can be read side by side.
+   ------------------------------------------------------------------ */
+const TICK = 0.01;
+const toTick = p => Math.round(p / TICK) * TICK;
+const px = p => p.toFixed(2);
+
+class Book {
+  constructor() { this.bids = new Map(); this.asks = new Map(); this.nextId = 0; this.trades = []; }
+
+  bestBid() { return this.bids.size ? Math.max(...this.bids.keys()) : null; }
+  bestAsk() { return this.asks.size ? Math.min(...this.asks.keys()) : null; }
+  mid() { const b = this.bestBid(), a = this.bestAsk(); return (b === null || a === null) ? null : (b + a) / 2; }
+  spread() { const b = this.bestBid(), a = this.bestAsk(); return (b === null || a === null) ? null : a - b; }
+
+  depth(side, levels = 8) {
+    const book = side === 'BUY' ? this.bids : this.asks;
+    const prices = [...book.keys()].sort((x, y) => side === 'BUY' ? y - x : x - y).slice(0, levels);
+    return prices.map(p => [p, book.get(p).reduce((s, o) => s + o.qty, 0)]);
+  }
+
+  // The only place matching logic lives. limitPrice === null is a market order.
+  _match(incoming, limitPrice) {
+    const book = incoming.side === 'BUY' ? this.asks : this.bids;
+    const trades = [];
+    while (incoming.qty > 0 && book.size) {
+      const best = incoming.side === 'BUY' ? Math.min(...book.keys()) : Math.max(...book.keys());
+      if (limitPrice !== null) {
+        const crosses = incoming.side === 'BUY' ? best <= limitPrice + 1e-9 : best >= limitPrice - 1e-9;
+        if (!crosses) break;
+      }
+      const queue = book.get(best);
+      const resting = queue[0];
+      const fill = Math.min(incoming.qty, resting.qty);
+      // Printed at the MAKER's price — the resting order set the terms.
+      trades.push({price: best, qty: fill, maker: resting.id, taker: incoming.id});
+      incoming.qty -= fill; resting.qty -= fill;
+      if (resting.qty === 0) { queue.shift(); if (!queue.length) book.delete(best); }
+    }
+    return trades;
+  }
+
+  _rest(order) {
+    const book = order.side === 'BUY' ? this.bids : this.asks;
+    if (!book.has(order.price)) book.set(order.price, []);
+    book.get(order.price).push(order);   // append to the back: the queue IS the priority
+  }
+
+  _fillable(side, limitPrice) {
+    const book = side === 'BUY' ? this.asks : this.bids;
+    let total = 0;
+    for (const [p, q] of book) {
+      const crosses = side === 'BUY' ? p <= limitPrice + 1e-9 : p >= limitPrice - 1e-9;
+      if (crosses) total += q.reduce((s, o) => s + o.qty, 0);
+    }
+    return total;
+  }
+
+  addLimit(side, price, qty) {
+    const o = {id: this.nextId++, side, price: toTick(price), qty};
+    const t = this._match(o, o.price);
+    if (o.qty > 0) this._rest(o);
+    return {trades: t, rested: o.qty};
+  }
+  market(side, qty) {
+    const o = {id: this.nextId++, side, price: 0, qty};
+    return {trades: this._match(o, null), rested: 0, discarded: o.qty};
+  }
+  ioc(side, price, qty) {
+    const o = {id: this.nextId++, side, price: toTick(price), qty};
+    const t = this._match(o, o.price);
+    return {trades: t, rested: 0, discarded: o.qty};
+  }
+  fok(side, price, qty) {
+    // Look before you leap: _match mutates the book as it walks, so a
+    // short fill cannot be undone. Check available liquidity read-only first.
+    if (this._fillable(side, toTick(price)) < qty) return {trades: [], rested: 0, killed: true};
+    const o = {id: this.nextId++, side, price: toTick(price), qty};
+    return {trades: this._match(o, o.price), rested: 0};
+  }
+}
+
+function seed(book) {
+  for (let i = 1; i <= 5; i++) {
+    book.addLimit('BUY', 100.00 - i * TICK, 100);
+    book.addLimit('SELL', 100.00 + i * TICK, 100);
+  }
+}
+
+let book = new Book();
+seed(book);
+let tape = [];
+
+function render(flashPrices = new Set()) {
+  const asks = book.depth('SELL', 7).reverse();
+  const bids = book.depth('BUY', 7);
+  const maxQ = Math.max(1, ...[...asks, ...bids].map(l => l[1]));
+  const row = (p, q, cls) => {
+    const w = Math.max(2, (q / maxQ) * 100);
+    return `<div class="lvl ${cls}${flashPrices.has(px(p)) ? ' flash' : ''}">
+      <span class="px">${px(p)}</span><span class="qt">${q.toLocaleString()}</span>
+      <span class="bar" style="width:${w}%"></span></div>`;
+  };
+  const sp = book.spread(), mid = book.mid();
+  document.getElementById('ladder').innerHTML =
+    asks.map(l => row(l[0], l[1], 'ask')).join('') +
+    `<div class="midrow"><span>spread</span><span>${sp === null ? '—' : px(sp)}</span></div>` +
+    bids.map(l => row(l[0], l[1], 'bid')).join('');
+
+  document.getElementById('d-bid').textContent = book.bestBid() === null ? '—' : px(book.bestBid());
+  document.getElementById('d-ask').textContent = book.bestAsk() === null ? '—' : px(book.bestAsk());
+  document.getElementById('d-spread').textContent = sp === null ? '—' : px(sp);
+  document.getElementById('d-mid').textContent = mid === null ? '—' : mid.toFixed(3);
+
+  document.querySelector('#t-tape tbody').innerHTML = tape.slice(0, 12).map(t => `
+    <tr><td class="mono" style="color:var(--ink)">${px(t.price)}</td>
+        <td class="n">${t.qty}</td><td class="n">#${t.maker}</td><td class="n">#${t.taker}</td></tr>`).join('');
+}
+
+function report(res, label) {
+  const filled = res.trades.reduce((s, t) => s + t.qty, 0);
+  const vwap = filled ? res.trades.reduce((s, t) => s + t.price * t.qty, 0) / filled : 0;
+  let msg;
+  if (res.killed) {
+    msg = `<strong style="color:var(--amber)">Killed.</strong> Not enough liquidity within the limit price to fill the whole order, so a Fill-Or-Kill does nothing at all — the book is untouched.`;
+  } else if (!filled) {
+    msg = res.rested
+      ? `<strong style="color:var(--ink)">Rested.</strong> Nothing crossed, so all ${res.rested} shares are now sitting in the book as passive liquidity.`
+      : `<strong style="color:var(--amber)">Nothing filled and nothing rested</strong> — an ${label} discards whatever it can't take immediately.`;
+  } else {
+    msg = `<strong style="color:var(--green)">Filled ${filled}</strong> at an average of ${vwap.toFixed(4)} across ${res.trades.length} price level${res.trades.length > 1 ? 's' : ''}, each printing at the <em>maker's</em> price.`;
+    if (res.rested) msg += ` The remaining ${res.rested} rested — the order took liquidity, then became the passive side.`;
+    if (res.discarded) msg += ` The remaining ${res.discarded} were discarded.`;
+  }
+  document.getElementById('d-result').innerHTML = msg;
+  document.getElementById('d-tape-note').textContent =
+    tape.length ? `${tape.length} trade${tape.length > 1 ? 's' : ''} so far, newest first. Maker and taker are order IDs.` : '';
+}
+
+function send() {
+  const side = document.getElementById('i-side').value;
+  const type = document.getElementById('i-type').value;
+  const price = parseFloat(document.getElementById('i-price').value);
+  const qty = Math.max(1, parseInt(document.getElementById('i-qty').value) || 0);
+  let res;
+  if (type === 'MARKET') res = book.market(side, qty);
+  else if (type === 'IOC') res = book.ioc(side, price, qty);
+  else if (type === 'FOK') res = book.fok(side, price, qty);
+  else res = book.addLimit(side, price, qty);
+  tape = [...res.trades.reverse(), ...tape].slice(0, 60);
+  render(new Set(res.trades.map(t => px(t.price))));
+  report(res, type);
+}
+
+// Zero-intelligence flow: the same event mix the Python simulator uses.
+function randomFlow(n = 200) {
+  for (let i = 0; i < n; i++) {
+    const roll = Math.random();
+    const side = Math.random() < 0.5 ? 'BUY' : 'SELL';
+    const mid = book.mid() || 100;
+    if (roll < 0.60) {
+      const offset = Math.abs(gauss()) * 3 * TICK;
+      const passive = Math.random() < 0.8;
+      const p = side === 'BUY' ? (passive ? mid - offset : mid + offset)
+                               : (passive ? mid + offset : mid - offset);
+      const r = book.addLimit(side, p, 10 + Math.floor(Math.random() * 90));
+      tape = [...r.trades.reverse(), ...tape];
+    } else if (roll < 0.85) {
+      const r = book.market(side, 10 + Math.floor(Math.random() * 190));
+      tape = [...r.trades.reverse(), ...tape];
+    } else {
+      const b = Math.random() < 0.5 ? book.bids : book.asks;
+      const keys = [...b.keys()];
+      if (keys.length) {
+        const k = keys[Math.floor(Math.random() * keys.length)];
+        const q = b.get(k); q.shift(); if (!q.length) b.delete(k);
+      }
+    }
+  }
+  tape = tape.slice(0, 60);
+  render();
+  document.getElementById('d-result').innerHTML =
+    `<strong style="color:var(--ink)">${n} random events pushed through.</strong> 60% limit orders, 25% market orders, 15% cancels — no strategy anywhere. Watch what the spread and the depth profile do on their own.`;
+}
+function gauss() {
+  let u = 0, v = 0;
+  while (!u) u = Math.random();
+  while (!v) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+document.getElementById('b-send').onclick = send;
+document.getElementById('b-flow').onclick = () => randomFlow(200);
+document.getElementById('b-reset').onclick = () => {
+  book = new Book(); seed(book); tape = []; render();
+  document.getElementById('d-result').textContent =
+    'Book reset to five levels of 100 shares either side of 100.00.';
+};
+document.getElementById('i-type').onchange = e => {
+  document.getElementById('w-price').style.visibility = e.target.value === 'MARKET' ? 'hidden' : 'visible';
+};
+render();
+
+/* ---------------- simulation results ---------------- */
+const m = D.meta, s = D.spread_stats;
+document.getElementById('m-events').textContent = (m.events / 1000) + 'k';
+document.getElementById('m-trades').textContent = m.trades.toLocaleString();
+document.getElementById('m-volume').textContent = m.volume.toLocaleString() + ' shares traded';
+document.getElementById('m-spread').textContent = s.mean.toFixed(4);
+document.getElementById('m-tight').textContent = (s.at_one_tick * 100).toFixed(1) + '%';
+document.getElementById('x-exp').textContent = D.impact.exponent.toFixed(2);
+document.getElementById('x-hurst').textContent = D.variance.hurst.toFixed(2);
+document.getElementById('x-acf').textContent = D.variance.acf1.toFixed(3);
+
+const c = C();
+const barOpts = (xTitle, yTitle) => ({
+  responsive: true, maintainAspectRatio: false,
+  plugins: {legend: {display: false}},
+  scales: {
+    x: {title: {display: true, text: xTitle, color: c.ink3}, grid: {display: false}, ticks: {color: c.ink3}},
+    y: {title: {display: true, text: yTitle, color: c.ink3}, grid: {color: c.line},
+        ticks: {color: c.ink3}, border: {display: false}}
+  }
+});
+
+new Chart(document.getElementById('c-spread'), {
+  type: 'bar',
+  data: {labels: D.spread_hist.map(r => r[0]),
+         datasets: [{data: D.spread_hist.map(r => r[1]), backgroundColor: c.blue, borderRadius: 2}]},
+  options: barOpts('spread, in ticks', 'events')
+});
+
+new Chart(document.getElementById('c-depth'), {
+  type: 'bar',
+  data: {
+    labels: [...D.depth.bids.map(l => px(l[0])).reverse(), ...D.depth.asks.map(l => px(l[0]))],
+    datasets: [{
+      data: [...D.depth.bids.map(l => l[1]).reverse(), ...D.depth.asks.map(l => l[1])],
+      backgroundColor: [...D.depth.bids.map(() => c.green), ...D.depth.asks.map(() => c.red)],
+      borderRadius: 2
+    }]
+  },
+  options: {...barOpts('price level (bids green, asks red)', 'resting shares'),
+            plugins: {legend: {display: false},
+                      tooltip: {callbacks: {label: ctx => ctx.parsed.y.toLocaleString() + ' shares'}}}}
+});
+
+new Chart(document.getElementById('c-impact'), {
+  type: 'bar',
+  data: {labels: D.impact.rows.map(r => `${r.lo}–${r.hi}`),
+         datasets: [{data: D.impact.rows.map(r => r.mean), backgroundColor: c.amber, borderRadius: 2}]},
+  options: {...barOpts('market order size (shares)', 'mean |mid move|'),
+            plugins: {legend: {display: false},
+                      tooltip: {callbacks: {label: ctx =>
+                        ctx.parsed.y.toFixed(6) + '  (n=' + D.impact.rows[ctx.dataIndex].n.toLocaleString() + ')'}}}}
+});
+
+new Chart(document.getElementById('c-var'), {
+  type: 'line',
+  data: {
+    labels: D.variance.rows.map(r => r.k),
+    datasets: [
+      {label: 'observed', data: D.variance.rows.map(r => r.ratio), borderColor: c.blue,
+       backgroundColor: c.blue, borderWidth: 2, pointRadius: 3, tension: 0},
+      {label: 'a true random walk', data: D.variance.rows.map(r => r.k), borderColor: c.ink3,
+       borderWidth: 1.4, borderDash: [5, 4], pointRadius: 0, tension: 0}
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: {legend: {labels: {color: c.ink2, boxWidth: 10, boxHeight: 2, padding: 14}}},
+    scales: {
+      x: {title: {display: true, text: 'horizon k (events)', color: c.ink3}, grid: {display: false}, ticks: {color: c.ink3}},
+      y: {type: 'logarithmic', title: {display: true, text: 'variance ratio vs k=1', color: c.ink3},
+          grid: {color: c.line}, ticks: {color: c.ink3}, border: {display: false}}
+    }
+  }
+});
+
+</script>
+</body>
+</html>
