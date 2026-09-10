@@ -141,6 +141,49 @@ reads as the specification:
 - Cancels preserve the queue position of everything else at the level.
 - A filled order cannot be cancelled.
 
+## 5. What it costs to run
+
+Everything above is about what the book *produces*. This is about what it costs, which is the
+other half of the reason exchanges are interesting: a matching engine is a latency-sensitive
+piece of infrastructure before it is a source of stylized facts.
+
+`benchmark.py` sweeps book depth and times two implementations in the same process — the
+current one, and `ScanBook`, which overrides exactly one method to restore the previous
+`max(bids)` / `min(asks)` lookup. Everything else is shared, so any difference is attributable
+to best-price lookup alone.
+
+| levels | scan (ev/s) | heap (ev/s) |
+|---|---|---|
+| 10 | 91,104 | 97,775 |
+| 50 | 90,542 | 101,333 |
+| 100 | 80,150 | 96,828 |
+| 500 | 36,821 | 93,223 |
+| 1,000 | 12,500 | 43,933 |
+
+Scanning the price dict costs 7.3x throughput going from 10 to 1,000 levels. The heap costs
+2.2x over the same range, and what remains is mostly the simulator's own bookkeeping rather
+than the book's. In isolation the lookup itself is 33x faster at 1,000 levels (7,922ns → 239ns).
+
+Per-operation latency at 500 levels, microseconds:
+
+| operation | n | p50 | p99 | max |
+|---|---|---|---|---|
+| add | 12,063 | 4.22 | 15.49 | 157.15 |
+| cancel | 4,946 | 1.94 | 170.38 | 469.48 |
+| market | 2,991 | 13.44 | 43.92 | 704.00 |
+
+The interesting row is cancel: the fastest median operation in the book and the worst tail, an
+88x p50-to-p99 gap. `cancel()` finds the order in O(1) through `_by_id` and then calls
+`deque.remove()`, which is O(orders resting at that price level). Cancelling at the front of a
+queue is instant; cancelling at the back of a deep one walks it. Real flow is mostly cancels, so
+this is the next bottleneck, and it is the one the code's own docstring named before anything
+was measured. Fixing it means lazy deletion on orders too — flag the order dead and let the
+matching loop skip it — which is a bigger change than the heaps, since `depth()`,
+`_fillable_quantity()` and `_match()` would all have to learn to ignore dead orders.
+
+These are single-run numbers from CPython on a shared VM and they wobble 10-20% between runs.
+The shape of the curves is the result; the absolute figures are not.
+
 ## What isn't modeled
 
 - One symbol, one venue. No routing, no NBBO, no Reg NMS.

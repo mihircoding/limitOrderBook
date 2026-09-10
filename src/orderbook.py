@@ -10,12 +10,27 @@ Internal representation:
     self._next_ts : int                     # monotonic sequence number
 
 A deque per price level gives time priority for free: append to the back, fill
-from the front. Best price is then max(bids) / min(asks) over the dict keys —
-O(number of price levels), which is fine at this scale. Production books keep a
-sorted structure, or an array indexed by tick, so best-price lookup is O(1).
-That is a profiling-driven optimization, not where you start.
+from the front.
+
+Best price used to be max(bids) / min(asks) over the dict keys, which is
+O(number of price levels) and gets read on every quote, every pass of the
+matching loop and every event the simulator generates. `benchmark.py` says
+that cost is real: the lookup grows linearly with depth (446ns at 10 levels,
+7,922ns at 1,000) and drags the whole simulation down with it, from 91k
+events/sec at 10 levels to 12.5k at 1,000. So each side also keeps a heap of
+its live price levels: O(1) to read the best price, O(log L) to insert a new
+one. Same sweep with the heaps: 98k events/sec at 10 levels, 44k at 1,000.
+
+The heaps use LAZY deletion. Emptying a price level does not remove it from the
+heap — the entry is dropped when it surfaces at the top and turns out to be
+gone. Removing an arbitrary element from a binary heap is O(L); letting the
+stale entry pay for itself later is O(log L) amortized and no bookkeeping at
+the deletion site. `_in_heap` keeps at most one entry per distinct price, so a
+level that is repeatedly created and destroyed can't grow the heap without
+bound.
 """
 
+import heapq
 from collections import deque
 
 from .order import Order, Side, StpPolicy, Trade
@@ -29,15 +44,43 @@ class LimitOrderBook:
         self._next_ts = 0
         self._next_id = 0
 
+        # Price-level heaps. Python's heapq is a min-heap, so bids are stored
+        # negated to make the highest price come out first.
+        self._bid_heap: list[float] = []
+        self._ask_heap: list[float] = []
+        self._bid_in_heap: set[float] = set()
+        self._ask_in_heap: set[float] = set()
+
     # ---------- quotes ----------
+
+    def _best_price(self, side: Side) -> float | None:
+        """Best resting price on one side, or None if that side is empty.
+
+        Amortized O(1): the answer is at the top of the heap. The loop is not
+        a scan — it discards levels that have since emptied, and each stale
+        entry is discarded exactly once over the life of the book.
+        """
+        if side is Side.BUY:
+            book, heap, live, sign = self.bids, self._bid_heap, self._bid_in_heap, -1.0
+        else:
+            book, heap, live, sign = self.asks, self._ask_heap, self._ask_in_heap, 1.0
+
+        while heap:
+            price = sign * heap[0]
+            if price in book:
+                return price
+            heapq.heappop(heap)
+            live.discard(price)
+
+        return None
 
     def best_bid(self) -> float | None:
         """Highest bid price with resting size, or None if no bids."""
-        return max(self.bids) if self.bids else None
+        return self._best_price(Side.BUY)
 
     def best_ask(self) -> float | None:
         """Lowest ask price with resting size, or None if no asks."""
-        return min(self.asks) if self.asks else None
+        return self._best_price(Side.SELL)
 
     def depth(self, side: Side, levels: int = 5) -> list[tuple[float, int]]:
         """Top `levels` price levels on one side as [(price, total_qty), ...].
@@ -242,8 +285,12 @@ class LimitOrderBook:
         book = self.asks if incoming.side is Side.BUY else self.bids
         trades: list[Trade] = []
 
+        opposite = Side.SELL if incoming.side is Side.BUY else Side.BUY
+
         while incoming.quantity > 0 and book:
-            best = min(book) if incoming.side is Side.BUY else max(book)
+            best = self._best_price(opposite)
+            if best is None:
+                break
 
             if limit_price is not None:
                 crosses = (best <= limit_price if incoming.side is Side.BUY
@@ -290,10 +337,25 @@ class LimitOrderBook:
         return trades
 
     def _rest(self, order: Order) -> None:
-        """Append an order to the back of the FIFO queue at its price level."""
-        book = self.bids if order.side is Side.BUY else self.asks
+        """Append an order to the back of the FIFO queue at its price level.
+
+        A brand-new price level also has to enter that side's heap. `_in_heap`
+        is what makes the push conditional: without it, a level that empties
+        and refills — which is most of them, in a book with a live spread —
+        would push a duplicate every time and the heap would grow forever
+        even though the number of distinct prices never changes.
+        """
+        if order.side is Side.BUY:
+            book, heap, live, sign = self.bids, self._bid_heap, self._bid_in_heap, -1.0
+        else:
+            book, heap, live, sign = self.asks, self._ask_heap, self._ask_in_heap, 1.0
+
         book.setdefault(order.price, deque()).append(order)
         self._by_id[order.order_id] = order
+
+        if order.price not in live:
+            live.add(order.price)
+            heapq.heappush(heap, sign * order.price)
 
     # ---------- convenience ----------
 

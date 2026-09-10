@@ -16,10 +16,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from benchmark import ScanBook, latency_percentiles, time_quotes, time_simulation
 from run_simulation import N_EVENTS, SEED
 from src.order import Side
 from src.orderbook import LimitOrderBook
 from src.simulator import hurst_exponent, impact_exponent, seed_book, simulate
+
+BENCH_DEPTHS = (10, 50, 100, 500, 1000)
+BENCH_EVENTS = 20_000   # smaller than benchmark.py's 50k so the page build stays quick
 
 OUT = Path(__file__).resolve().parent / "data.js"
 
@@ -62,6 +66,19 @@ def main():
     hurst = hurst_exponent(list(mids))
     acf1 = float(np.corrcoef(diffs_1[:-1], diffs_1[1:])[0, 1])
 
+    print(f"benchmarking ({len(BENCH_DEPTHS)} depths x 2 implementations)...")
+    perf = {"events": BENCH_EVENTS, "depths": [], "latency": {}}
+    for levels in BENCH_DEPTHS:
+        perf["depths"].append({
+            "levels": levels,
+            "scan_ns": round(time_quotes(ScanBook, levels, 50_000), 1),
+            "heap_ns": round(time_quotes(LimitOrderBook, levels, 50_000), 1),
+            "scan_eps": round(time_simulation(ScanBook, levels, BENCH_EVENTS)),
+            "heap_eps": round(time_simulation(LimitOrderBook, levels, BENCH_EVENTS)),
+        })
+    perf["latency"] = {op: {k: round(v, 2) for k, v in st.items()}
+                       for op, st in latency_percentiles(LimitOrderBook, 500).items()}
+
     data = {
         "meta": {"events": N_EVENTS, "seed": SEED,
                  "trades": result["n_trades"], "volume": result["volume"]},
@@ -78,6 +95,7 @@ def main():
         "impact": {"rows": impact_rows, "exponent": round(float(exponent), 3)},
         "variance": {"rows": var_rows, "hurst": round(float(hurst), 3),
                      "acf1": round(acf1, 4)},
+        "perf": perf,
     }
 
     OUT.write_text("window.DATA = " + json.dumps(data, separators=(",", ":")) + ";\n",
@@ -85,6 +103,9 @@ def main():
     print(f"wrote {OUT} ({OUT.stat().st_size / 1024:.0f} KB)")
     print(f"  {result['n_trades']:,} trades | spread mean {data['spread_stats']['mean']} "
           f"| impact^{data['impact']['exponent']} | hurst {data['variance']['hurst']}")
+    deep = perf["depths"][-1]
+    print(f"  perf at {deep['levels']} levels: scan {deep['scan_eps']:,} ev/s -> "
+          f"heap {deep['heap_eps']:,} ev/s")
 
 
 if __name__ == "__main__":

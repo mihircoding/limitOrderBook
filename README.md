@@ -10,12 +10,13 @@ strategy at all. The book still produces a realistic spread distribution, concav
 and a mid price that mean-reverts at short horizons exactly the way real equity data does. None
 of those were programmed in. They're properties of the matching rules.
 
-42 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
+51 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q          # 42 passed
+python -m pytest -q          # 51 passed
 python run_simulation.py     # 50k events, writes simulation.png
+python benchmark.py          # throughput and latency, heap vs dict-scan
 ```
 
 ![Emergent spread, impact and variance scaling](simulation.png)
@@ -144,7 +145,8 @@ What it produced over 50,000 events (details and numbers in [RESULTS.md](RESULTS
 │   ├── order.py         # Order and Trade types, tick rounding
 │   ├── orderbook.py     # the matching engine
 │   └── simulator.py     # zero-intelligence order flow
-└── tests/               # 42 tests, written as matching scenarios
+├── benchmark.py         # profiling: throughput vs depth, latency percentiles
+└── tests/               # 51 tests, written as matching scenarios
 ```
 
 `tests/test_orderbook.py` is worth reading as the specification — each test is one rule of the
@@ -184,6 +186,70 @@ than a real exchange can. FOK needed the most care here, for the same reason it 
 non-STP case: `_fillable_quantity` has to walk the book in the same price/time priority `_match`
 uses and apply the same self-trade rule while counting, or a FOK could fire and then discover
 mid-fill that some of what it counted was about to be cancelled instead of traded.
+
+## Performance
+
+`src/orderbook.py` used to carry a comment saying the best-price lookup — `max(bids)` /
+`min(asks)` over the price dict — was "fine at this scale," and that a sorted structure was "a
+profiling-driven optimization, not where you start." `benchmark.py` is that profiling, and it
+disagreed.
+
+The lookup is read on every quote, every pass of the matching loop, and every event the
+simulator generates. Scanning the keys is O(price levels), so its cost grows with depth while
+everything else in the book stays O(1):
+
+```
+ levels    scan (ns)    heap (ns)    speedup
+     10          446          354       1.3x
+     50          874          350       2.5x
+    100         1306          391       3.3x
+    500         5806          347      16.7x
+   1000         7922          239      33.1x
+```
+
+That is visible end to end, not just in a microbenchmark. The same 50,000-event
+zero-intelligence run, seeded to different depths:
+
+```
+ levels   scan (ev/s)   heap (ev/s)
+     10        91,104        97,775
+    100        80,150        96,828
+   1000        12,500        43,933
+```
+
+A book with a thousand price levels is not exotic — that is a liquid name with a penny tick.
+Scanning turns it into a 7x slowdown for a data structure that should barely notice.
+
+**The fix:** each side keeps a binary heap of its live price levels alongside the dict, so the
+best price is a peek instead of a scan. Deletion is lazy — emptying a level doesn't touch the
+heap; the entry is discarded when it surfaces at the top and turns out to be gone — because
+removing an arbitrary element from a heap is O(L) and would give back exactly what was just
+won. A membership set keeps at most one entry per distinct price, so a level that is created
+and destroyed a thousand times can't grow the heap a thousand entries.
+
+`tests/test_best_price.py` runs the heap and the old scan side by side over random order flow
+and asserts they agree after every single event, because an optimization that changes an answer
+is not an optimization.
+
+**What the benchmark found next.** Per-operation latency at 500 levels, in microseconds:
+
+```
+operation           n       p50       p99       max
+add            12,063      4.22     15.49    157.15
+cancel          4,946      1.94    170.38    469.48
+market          2,991     13.44     43.92    704.00
+```
+
+Cancel has the fastest median and by far the worst tail — an 88x gap between p50 and p99. That
+is `deque.remove()`, which is O(orders at that level): cancelling the order at the front of a
+deep queue is instant, cancelling the one at the back walks the whole thing. The cancel
+docstring has predicted this since the first commit ("the production trick is LAZY deletion"),
+and cancels outnumber fills in real flow, so this is the next thing worth fixing. It isn't fixed
+yet, and the README would rather say so than quietly not mention it.
+
+Numbers above are one run on one machine (CPython 3.10, shared VM), and they move around by
+10-20% between runs. The *shape* is the finding — flat versus linear in depth — not the
+absolute nanoseconds.
 
 ## Known simplifications
 

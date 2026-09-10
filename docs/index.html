@@ -271,6 +271,32 @@ input[type=number]{padding:7px 10px;border:1px solid var(--line2);border-radius:
 
 <section>
 <div class="wrap">
+  <div class="eyebrow">Performance</div>
+  <h2>The comment that said "fine at this scale"</h2>
+  <p class="lede">Best price used to be <span class="mono">max(bids)</span> / <span class="mono">min(asks)</span> over the price dictionary, with a comment saying a sorted structure was "a profiling-driven optimization, not where you start." That's a reasonable place to start and a bad place to stay: the lookup is read on every quote, every pass of the matching loop and every event the simulator generates, and it's the one operation in the book whose cost grows with depth.</p>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="chart"><canvas id="c-perf"></canvas></div>
+      <p class="cap">Same 20,000-event run, seeded to different depths. Two implementations timed in the same process &mdash; the control overrides one method and shares everything else, so the gap is best-price lookup and nothing else.</p>
+    </div>
+    <div>
+      <div class="scroll"><table id="t-perf"><thead><tr><th class="n">Levels</th><th class="n">Scan lookup</th><th class="n">Heap lookup</th><th class="n">Scan</th><th class="n">Heap</th></tr></thead><tbody></tbody></table></div>
+      <p style="margin-top:14px">Each side now keeps a binary heap of its live price levels, so the best price is a peek instead of a scan. Deletion is <strong style="color:var(--ink)">lazy</strong> &mdash; emptying a level doesn't touch the heap, and the stale entry is discarded when it surfaces at the top &mdash; because removing an arbitrary element from a heap is O(L) and would hand back exactly what was just won.</p>
+      <p>A differential test runs the heap and the old scan side by side over random order flow and asserts they agree after every single event. An optimization that changes an answer isn't one.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <p><strong>What the benchmark found next: cancel has the fastest median and the worst tail.</strong> Per-operation latency at 500 levels, in microseconds &mdash; <span id="p-lat">&mdash;</span>. That's <span class="mono">deque.remove()</span>, which is O(orders at that level): cancelling at the front of a queue is instant, cancelling at the back walks the whole thing. Cancels outnumber fills in real flow, so this is the next thing worth fixing, and it isn't fixed yet.</p>
+  </div>
+
+  <p style="font-size:13.5px;color:var(--ink3)">One run, CPython on a shared VM; the figures move 10&ndash;20% between runs. The shape &mdash; flat versus linear in depth &mdash; is the finding, not the nanoseconds.</p>
+</div>
+</section>
+
+<section>
+<div class="wrap">
   <div class="eyebrow">Honesty</div>
   <h2>What isn't modeled</h2>
   <div class="grid2">
@@ -593,6 +619,47 @@ new Chart(document.getElementById('c-var'), {
     }
   }
 });
+
+// --- performance ---
+const P = D.perf;
+new Chart(document.getElementById('c-perf'), {
+  type: 'line',
+  data: {
+    labels: P.depths.map(r => r.levels),
+    datasets: [
+      {label: 'dict scan', data: P.depths.map(r => r.scan_eps), borderColor: c.red,
+       backgroundColor: c.red, borderWidth: 2, pointRadius: 3, tension: 0},
+      {label: 'heap', data: P.depths.map(r => r.heap_eps), borderColor: c.green,
+       backgroundColor: c.green, borderWidth: 2, pointRadius: 3, tension: 0}
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: {legend: {labels: {color: c.ink2, boxWidth: 10, boxHeight: 2, padding: 14}},
+              tooltip: {callbacks: {label: ctx =>
+                ctx.dataset.label + ': ' + ctx.parsed.y.toLocaleString() + ' ev/s'}}},
+    scales: {
+      x: {title: {display: true, text: 'price levels resting per side', color: c.ink3},
+          grid: {display: false}, ticks: {color: c.ink3}},
+      y: {title: {display: true, text: 'events / second', color: c.ink3},
+          grid: {color: c.line}, ticks: {color: c.ink3, callback: v => (v / 1000) + 'k'},
+          border: {display: false}}
+    }
+  }
+});
+
+document.querySelector('#t-perf tbody').innerHTML = P.depths.map(r => `
+  <tr><td class="n"><strong>${r.levels.toLocaleString()}</strong></td>
+      <td class="n">${Math.round(r.scan_ns).toLocaleString()} ns</td>
+      <td class="n">${Math.round(r.heap_ns).toLocaleString()} ns</td>
+      <td class="n">${r.scan_eps.toLocaleString()}</td>
+      <td class="n">${r.heap_eps.toLocaleString()}</td></tr>`).join('');
+
+document.getElementById('p-lat').textContent =
+  ['add', 'cancel', 'market'].filter(op => P.latency[op]).map(op => {
+    const s = P.latency[op];
+    return `${op} p50 ${s.p50.toFixed(2)}, p99 ${s.p99.toFixed(2)}`;
+  }).join('; ');
 
 </script>
 </body>
