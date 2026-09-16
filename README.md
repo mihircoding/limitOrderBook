@@ -10,13 +10,13 @@ strategy at all. The book still produces a realistic spread distribution, concav
 and a mid price that mean-reverts at short horizons exactly the way real equity data does. None
 of those were programmed in. They're properties of the matching rules.
 
-51 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
+69 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q          # 51 passed
+python -m pytest -q          # 69 passed
 python run_simulation.py     # 50k events, writes simulation.png
-python benchmark.py          # throughput and latency, heap vs dict-scan
+python benchmark.py          # throughput and latency, against the older implementations
 ```
 
 ![Emergent spread, impact and variance scaling](simulation.png)
@@ -98,13 +98,17 @@ individual fill.
 
 ### Cancels
 
-`cancel()` here removes the order from its deque immediately: O(1) lookup via an id→order dict,
-O(level size) to splice it out of the middle.
+`cancel()` does **lazy deletion**, which is what production engines do: flag the order dead,
+drop its id, decrement the level's live-order count, return. The order stays physically in its
+queue until the matching loop reaches it and throws it away.
 
-Production engines usually do **lazy deletion** — flag the order dead and let the matching loop
-skip it when it surfaces at the front. That makes cancel O(1) at the cost of some memory. It's
-the right trade because in real equity markets **well over 90% of orders are cancelled rather
-than filled**; cancel is the hot path, not fill.
+It used to splice the order out of its deque immediately, which is O(orders at that price level)
+— instant at the front of a queue, a full walk from the back. `benchmark.py` measured that as a
+2μs median against a 170μs p99, on the operation that is most of real order flow: in equity
+markets **well over 90% of orders are cancelled rather than filled**, so cancel is the hot path,
+not fill. Tombstoning takes the p99 to 3μs. The trade is memory, and the level's live count is
+what bounds it — when the last live order at a price goes, the price key is deleted and the
+deque goes with it, tombstones and all.
 
 ---
 
@@ -146,7 +150,7 @@ What it produced over 50,000 events (details and numbers in [RESULTS.md](RESULTS
 │   ├── orderbook.py     # the matching engine
 │   └── simulator.py     # zero-intelligence order flow
 ├── benchmark.py         # profiling: throughput vs depth, latency percentiles
-└── tests/               # 51 tests, written as matching scenarios
+└── tests/               # 69 tests, written as matching scenarios
 ```
 
 `tests/test_orderbook.py` is worth reading as the specification — each test is one rule of the
@@ -200,11 +204,11 @@ everything else in the book stays O(1):
 
 ```
  levels    scan (ns)    heap (ns)    speedup
-     10          446          354       1.3x
-     50          874          350       2.5x
-    100         1306          391       3.3x
-    500         5806          347      16.7x
-   1000         7922          239      33.1x
+     10          416          303       1.4x
+     50          708          307       2.3x
+    100         1118          308       3.6x
+    500         4531          318      14.2x
+   1000         8669          302      28.7x
 ```
 
 That is visible end to end, not just in a microbenchmark. The same 50,000-event
@@ -212,13 +216,13 @@ zero-intelligence run, seeded to different depths:
 
 ```
  levels   scan (ev/s)   heap (ev/s)
-     10        91,104        97,775
-    100        80,150        96,828
-   1000        12,500        43,933
+     10        73,727        80,720
+    100        62,227        79,588
+   1000        17,492        79,948
 ```
 
 A book with a thousand price levels is not exotic — that is a liquid name with a penny tick.
-Scanning turns it into a 7x slowdown for a data structure that should barely notice.
+Scanning turns it into a 4x slowdown for a data structure that should barely notice.
 
 **The fix:** each side keeps a binary heap of its live price levels alongside the dict, so the
 best price is a peek instead of a scan. Deletion is lazy — emptying a level doesn't touch the
@@ -231,21 +235,31 @@ and destroyed a thousand times can't grow the heap a thousand entries.
 and asserts they agree after every single event, because an optimization that changes an answer
 is not an optimization.
 
-**What the benchmark found next.** Per-operation latency at 500 levels, in microseconds:
+**What the benchmark found next, and what it cost to fix.** Cancel had the fastest median in
+the book and by far the worst tail — 1.94μs at p50 against 170.38μs at p99, an 88x gap. That is
+`deque.remove()` being O(orders at that level): cancelling the order at the front of a deep queue
+is instant, cancelling the one at the back walks the whole thing, and the caller can neither see
+nor choose which one they are.
+
+Same fix as the heaps, one layer down: tombstone instead of delete. Both versions timed in the
+same process, same flow, at 500 levels:
 
 ```
-operation           n       p50       p99       max
-add            12,063      4.22     15.49    157.15
-cancel          4,946      1.94    170.38    469.48
-market          2,991     13.44     43.92    704.00
+cancel()               p50       p99       max   p99/p50
+eager (deque)         2.09     79.62    131.81       38x
+lazy (tombstone)      0.89      3.21     43.62        4x
 ```
 
-Cancel has the fastest median and by far the worst tail — an 88x gap between p50 and p99. That
-is `deque.remove()`, which is O(orders at that level): cancelling the order at the front of a
-deep queue is instant, cancelling the one at the back walks the whole thing. The cancel
-docstring has predicted this since the first commit ("the production trick is LAZY deletion"),
-and cancels outnumber fills in real flow, so this is the next thing worth fixing. It isn't fixed
-yet, and the README would rather say so than quietly not mention it.
+The median halving is incidental. The p99 falling 25x is the result, and the p99/p50 ratio going
+from 38x to 4x is how you'd say it to a venue: a matching engine is judged on its tail, and the
+moments it blows out are the busy ones, which are the moments a resting quote most needs pulling.
+
+It also flattened the throughput curve. The heaps left a 2.2x fall-off from 10 to 1,000 levels;
+cancel was what remained of it, and the sweep is now flat end to end (80,720 ev/s at 10 levels,
+79,948 at 1,000).
+
+The memory is measured rather than assumed: after 20,000 events at 500 levels the book holds
+1,787 tombstones against 4,065 live orders, worst single level 368.
 
 Numbers above are one run on one machine (CPython 3.10, shared VM), and they move around by
 10-20% between runs. The *shape* is the finding — flat versus linear in depth — not the

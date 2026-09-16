@@ -16,7 +16,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmark import ScanBook, latency_percentiles, time_quotes, time_simulation
+from benchmark import (EagerCancelBook, ScanBook, latency_percentiles,
+                       time_quotes, time_simulation, tombstone_census)
 from run_simulation import N_EVENTS, SEED
 from src.order import Side
 from src.orderbook import LimitOrderBook
@@ -76,8 +77,15 @@ def main():
             "scan_eps": round(time_simulation(ScanBook, levels, BENCH_EVENTS)),
             "heap_eps": round(time_simulation(LimitOrderBook, levels, BENCH_EVENTS)),
         })
+    lazy_lat = latency_percentiles(LimitOrderBook, 500)
+    eager_lat = latency_percentiles(EagerCancelBook, 500)
     perf["latency"] = {op: {k: round(v, 2) for k, v in st.items()}
-                       for op, st in latency_percentiles(LimitOrderBook, 500).items()}
+                       for op, st in lazy_lat.items()}
+    perf["cancel"] = {
+        "eager": {k: round(v, 2) for k, v in eager_lat["cancel"].items()},
+        "lazy": {k: round(v, 2) for k, v in lazy_lat["cancel"].items()},
+        "census": tombstone_census(LimitOrderBook, 500),
+    }
 
     data = {
         "meta": {"events": N_EVENTS, "seed": SEED,

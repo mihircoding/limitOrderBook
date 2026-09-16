@@ -9,10 +9,11 @@ across machines, Python versions or moods:
 
     LimitOrderBook   - heap of live price levels, O(1) best-price read
     ScanBook         - the previous implementation, min()/max() over the dict
+    EagerCancelBook  - the previous cancel(), splicing the order out of its deque
 
-ScanBook overrides exactly one method. Everything else - matching, priority,
-cancels, STP - is shared, so any difference in the numbers is attributable to
-best-price lookup and nothing else.
+Each control overrides exactly one method. Everything else - matching,
+priority, STP - is shared, so any difference in the numbers is attributable to
+the one method and nothing else.
 
 Usage:
     python benchmark.py            # the full sweep, ~30s
@@ -46,6 +47,76 @@ class ScanBook(LimitOrderBook):
         if not book:
             return None
         return max(book) if side is Side.BUY else min(book)
+
+
+class EagerCancelBook(LimitOrderBook):
+    """The book as it was before tombstones: cancel splices the order out of
+    the middle of its deque.
+
+    Correct, and the obvious way to write it. Its cost is that `deque.remove()`
+    is O(orders at that level), so what a cancel costs depends on where in the
+    queue the order was sitting - which the caller neither chose nor can see.
+    Kept as a control for the same reason ScanBook is: the claim is that lazy
+    deletion fixed the cancel tail, and a claim needs something to measure
+    against.
+    """
+
+    def cancel(self, order_id: int) -> bool:
+        order = self._by_id.pop(order_id, None)
+        if order is None or not order.active:
+            return False
+
+        book = self.bids if order.side is Side.BUY else self.asks
+        queue = book.get(order.price)
+        if queue is None:
+            return False
+        try:
+            queue.remove(order)
+        except ValueError:
+            return False
+
+        order.active = False
+        self._drop_live(order.side, order.price)
+        return True
+
+
+def tombstone_census(book_cls, levels: int, n: int = 20_000, seed: int = 3) -> dict:
+    """What lazy cancellation actually leaves lying around.
+
+    The memory cost of a tombstone is real and the docstrings claim it stays
+    bounded, so measure it instead. Runs the same flow as
+    latency_percentiles() and then counts, across every level still in the
+    book: how many cancelled orders are still physically sitting in a queue,
+    and the worst single level.
+    """
+    rng = np.random.default_rng(seed)
+    book = build(book_cls, levels)
+    live: list[int] = list(book._by_id)
+
+    for _ in range(n):
+        roll = rng.random()
+        if roll < 0.6:
+            side = Side.BUY if rng.random() < 0.5 else Side.SELL
+            offset = (1 + abs(rng.normal(0, 3))) * TICK
+            price = to_tick(100.0 - offset if side is Side.BUY else 100.0 + offset)
+            oid, _ = book.add_limit_order(side, price, 100)
+            if oid in book._by_id:
+                live.append(oid)
+        elif roll < 0.85 and live:
+            book.cancel(live.pop(int(rng.integers(len(live)))))
+        else:
+            side = Side.BUY if rng.random() < 0.5 else Side.SELL
+            book.market_order(side, int(rng.integers(10, 400)))
+
+    dead = resting = 0
+    worst = 0
+    for side_book in (book.bids, book.asks):
+        for queue in side_book.values():
+            d = sum(1 for o in queue if not o.active)
+            dead += d
+            resting += len(queue) - d
+            worst = max(worst, d)
+    return {"tombstones": dead, "live_orders": resting, "worst_level": worst}
 
 
 def build(book_cls, levels: int, qty: int = 100, mid: float = 100.0):
@@ -186,9 +257,25 @@ def main() -> None:
 
     print("\nPer-operation latency at 500 levels, microseconds")
     print("-" * 56)
+    lazy = latency_percentiles(LimitOrderBook, 500)
     print(f"{'operation':<12} {'n':>8} {'p50':>9} {'p99':>9} {'max':>9}")
-    for op, st in latency_percentiles(LimitOrderBook, 500).items():
+    for op, st in lazy.items():
         print(f"{op:<12} {st['n']:>8,} {st['p50']:>9.2f} {st['p99']:>9.2f} {st['max']:>9.2f}")
+
+    print("\nCancel: splicing the deque vs leaving a tombstone, same flow")
+    print("-" * 56)
+    eager = latency_percentiles(EagerCancelBook, 500)
+    print(f"{'cancel()':<16} {'p50':>9} {'p99':>9} {'max':>9} {'p99/p50':>9}")
+    for label, st in (("eager (deque)", eager["cancel"]), ("lazy (tombstone)", lazy["cancel"])):
+        print(f"{label:<16} {st['p50']:>9.2f} {st['p99']:>9.2f} {st['max']:>9.2f} "
+              f"{st['p99'] / st['p50']:>8.0f}x")
+
+    census = tombstone_census(LimitOrderBook, 500)
+    print(f"\nWhat the tombstones cost: {census['tombstones']:,} cancelled orders still "
+          f"held\nagainst {census['live_orders']:,} live ones, worst single level "
+          f"{census['worst_level']}.")
+    print("They are freed when the matching loop reaches them, or all at once when")
+    print("the level empties and its deque is dropped.")
 
 
 if __name__ == "__main__":

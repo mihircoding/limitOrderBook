@@ -288,7 +288,22 @@ input[type=number]{padding:7px 10px;border:1px solid var(--line2);border-radius:
   </div>
 
   <div class="note">
-    <p><strong>What the benchmark found next: cancel has the fastest median and the worst tail.</strong> Per-operation latency at 500 levels, in microseconds &mdash; <span id="p-lat">&mdash;</span>. That's <span class="mono">deque.remove()</span>, which is O(orders at that level): cancelling at the front of a queue is instant, cancelling at the back walks the whole thing. Cancels outnumber fills in real flow, so this is the next thing worth fixing, and it isn't fixed yet.</p>
+    <p><strong>What the benchmark found next: cancel had the fastest median and the worst tail.</strong> Per-operation latency at 500 levels, in microseconds &mdash; <span id="p-lat">&mdash;</span>. That was <span class="mono">deque.remove()</span>, which is O(orders at that level): cancelling at the front of a queue is instant, cancelling at the back walks the whole thing, and the caller can neither see nor choose which one they are. In real equity markets well over 90% of orders are cancelled rather than filled, so that was the hot path wearing the worst distribution.</p>
+  </div>
+
+  <h3 style="margin-top:34px">Same fix, one layer down: don't delete, tombstone</h3>
+  <p><span class="mono">cancel()</span> now flags the order inactive, drops its id, decrements the level's live-order count and returns. The order stays physically in its queue until the matching loop reaches it and throws it away &mdash; the one moment the work was unavoidable anyway. Per-level live counts are what keep it honest: when the last live order at a price goes, the price key is deleted in O(1), so the quotes, the depth and the heaps never see a level nobody is quoting, and the dropped queue takes its tombstones with it.</p>
+
+  <div class="grid2" style="margin-top:18px">
+    <div>
+      <div class="scroll"><table id="t-cancel"><thead><tr><th>cancel()</th><th class="n">p50</th><th class="n">p99</th><th class="n">max</th><th class="n">p99/p50</th></tr></thead><tbody></tbody></table></div>
+      <p class="cap">Both implementations timed in the same process on identical flow. The control restores the old <span class="mono">deque.remove()</span> and overrides nothing else.</p>
+    </div>
+    <div>
+      <p>The median halving is incidental. <strong style="color:var(--ink)">The 99th percentile falling <span id="x-p99">&mdash;</span></strong> is the result, and the p50-to-p99 ratio going from <span id="x-ratio">&mdash;</span> is how you'd put it to a venue: a matching engine is judged on its tail, and the moments it blows out are the busy ones &mdash; which are exactly the moments a resting quote most needs pulling.</p>
+      <p>It also flattened the throughput curve above. The heaps left a 2.2&times; fall-off from 10 to 1,000 levels; cancel was what remained of it, and the sweep is now flat end to end.</p>
+      <p>The cost is memory, measured rather than asserted: <span id="x-tomb">&mdash;</span>.</p>
+    </div>
   </div>
 
   <p style="font-size:13.5px;color:var(--ink3)">One run, CPython on a shared VM; the figures move 10&ndash;20% between runs. The shape &mdash; flat versus linear in depth &mdash; is the finding, not the nanoseconds.</p>
@@ -660,6 +675,27 @@ document.getElementById('p-lat').textContent =
     const s = P.latency[op];
     return `${op} p50 ${s.p50.toFixed(2)}, p99 ${s.p99.toFixed(2)}`;
   }).join('; ');
+
+if (P.cancel) {
+  const rows = [['eager (splice the deque)', P.cancel.eager], ['lazy (tombstone)', P.cancel.lazy]];
+  document.querySelector('#t-cancel tbody').innerHTML = rows.map(([label, s], i) => `
+    <tr><td>${i ? '<strong>' + label + '</strong>' : label}</td>
+        <td class="n">${s.p50.toFixed(2)}</td>
+        <td class="n">${s.p99.toFixed(2)}</td>
+        <td class="n">${s.max.toFixed(2)}</td>
+        <td class="n">${Math.round(s.p99 / s.p50)}&times;</td></tr>`).join('');
+
+  document.getElementById('x-p99').textContent =
+    `${(P.cancel.eager.p99 / P.cancel.lazy.p99).toFixed(0)}\u00d7, from ` +
+    `${P.cancel.eager.p99.toFixed(1)}\u00b5s to ${P.cancel.lazy.p99.toFixed(1)}\u00b5s`;
+  document.getElementById('x-ratio').textContent =
+    `${Math.round(P.cancel.eager.p99 / P.cancel.eager.p50)}\u00d7 to ` +
+    `${Math.round(P.cancel.lazy.p99 / P.cancel.lazy.p50)}\u00d7`;
+  const c = P.cancel.census;
+  document.getElementById('x-tomb').textContent =
+    `after 20,000 events at 500 levels the book holds ${c.tombstones.toLocaleString()} ` +
+    `tombstones against ${c.live_orders.toLocaleString()} live orders, worst single level ${c.worst_level}`;
+}
 
 </script>
 </body>

@@ -21,13 +21,26 @@ events/sec at 10 levels to 12.5k at 1,000. So each side also keeps a heap of
 its live price levels: O(1) to read the best price, O(log L) to insert a new
 one. Same sweep with the heaps: 98k events/sec at 10 levels, 44k at 1,000.
 
-The heaps use LAZY deletion. Emptying a price level does not remove it from the
-heap — the entry is dropped when it surfaces at the top and turns out to be
-gone. Removing an arbitrary element from a binary heap is O(L); letting the
-stale entry pay for itself later is O(log L) amortized and no bookkeeping at
-the deletion site. `_in_heap` keeps at most one entry per distinct price, so a
+Two things in here are deleted LAZILY, for the same reason in both cases: the
+eager version has to walk a structure, and the lazy one lets whatever passes
+by next do the work instead.
+
+Price levels in the heaps. Emptying a level does not remove it from the heap —
+the entry is dropped when it surfaces at the top and turns out to be gone.
+Removing an arbitrary element from a binary heap is O(L); letting the stale
+entry pay for itself later is O(log L) amortized and no bookkeeping at the
+deletion site. `_in_heap` keeps at most one entry per distinct price, so a
 level that is repeatedly created and destroyed can't grow the heap without
 bound.
+
+Cancelled orders in the queues. cancel() flags the order and leaves it where
+it is; the matching loop discards these tombstones when they reach the front
+of a queue. Splicing one out of the middle of a deque is O(orders at that
+level), which benchmark.py caught as an 88x gap between the median cancel and
+the 99th percentile — on the operation that is most of real order flow.
+`_bid_live` / `_ask_live` count the live orders per level so an emptied level
+still leaves the book in O(1), which is also what bounds the tombstones: the
+price key is deleted, and the deque goes with it.
 """
 
 import heapq
@@ -51,6 +64,45 @@ class LimitOrderBook:
         self._bid_in_heap: set[float] = set()
         self._ask_in_heap: set[float] = set()
 
+        # Live (non-cancelled) order count per price level. cancel() is lazy —
+        # it flags the order and leaves it in its deque — so the deque's length
+        # stops being a reliable answer to "is this level still there". These
+        # counters are: they're what tells cancel() when it has emptied a level
+        # and the price key has to come out of the book, in O(1), without
+        # walking anything.
+        self._bid_live: dict[float, int] = {}
+        self._ask_live: dict[float, int] = {}
+
+    # ---------- level bookkeeping ----------
+
+    def _side_state(self, side: Side) -> tuple[dict, list, set, dict, float]:
+        """(book, heap, in_heap, live_counts, heap_sign) for one side.
+
+        One place that knows which of the parallel structures belongs to which
+        side. They have to stay in step — a price in `book` with no live count,
+        or a live count with no price, is a corrupt book — and four call sites
+        each re-deriving the mapping is how they drift apart.
+        """
+        if side is Side.BUY:
+            return self.bids, self._bid_heap, self._bid_in_heap, self._bid_live, -1.0
+        return self.asks, self._ask_heap, self._ask_in_heap, self._ask_live, 1.0
+
+    def _drop_live(self, side: Side, price: float) -> None:
+        """One live order left this price level: filled, cancelled or pulled by
+        self-trade prevention. When the last one goes, the level goes with it —
+        the price key is deleted even though the deque may still hold
+        tombstones, which is what keeps best_bid(), depth() and the heaps
+        honest about a level nobody is quoting any more. Deleting the key drops
+        the whole deque, so the tombstones are collected at the same moment.
+        """
+        book, _, _, live, _ = self._side_state(side)
+        remaining = live.get(price, 0) - 1
+        if remaining > 0:
+            live[price] = remaining
+            return
+        live.pop(price, None)
+        book.pop(price, None)
+
     # ---------- quotes ----------
 
     def _best_price(self, side: Side) -> float | None:
@@ -60,17 +112,14 @@ class LimitOrderBook:
         a scan — it discards levels that have since emptied, and each stale
         entry is discarded exactly once over the life of the book.
         """
-        if side is Side.BUY:
-            book, heap, live, sign = self.bids, self._bid_heap, self._bid_in_heap, -1.0
-        else:
-            book, heap, live, sign = self.asks, self._ask_heap, self._ask_in_heap, 1.0
+        book, heap, in_heap, _, sign = self._side_state(side)
 
         while heap:
             price = sign * heap[0]
             if price in book:
                 return price
             heapq.heappop(heap)
-            live.discard(price)
+            in_heap.discard(price)
 
         return None
 
@@ -91,7 +140,8 @@ class LimitOrderBook:
         """
         book = self.bids if side is Side.BUY else self.asks
         prices = sorted(book, reverse=side is Side.BUY)[:levels]
-        return [(price, sum(o.quantity for o in book[price])) for price in prices]
+        return [(price, sum(o.quantity for o in book[price] if o.active))
+                for price in prices]
 
     # ---------- limit orders ----------
 
@@ -208,6 +258,8 @@ class LimitOrderBook:
         total = 0
         for price in crossing_prices:
             for order in book[price]:  # deque is already FIFO / time-priority order
+                if not order.active:
+                    continue  # a cancelled order is not liquidity, tombstone or not
                 if participant_id is not None and order.participant_id == participant_id:
                     if stp_policy is StpPolicy.CANCEL_NEWEST:
                         return total  # would be killed on contact; nothing past here counts
@@ -238,28 +290,31 @@ class LimitOrderBook:
     def cancel(self, order_id: int) -> bool:
         """Remove a resting order. False if already filled, cancelled, or unknown.
 
-        _by_id finds the Order in O(1); removing it from the middle of its deque
-        is O(level size). The production trick is LAZY deletion — flag the order
-        dead here and let the matching loop skip dead orders when they surface at
-        the front — which trades a little memory for an O(1) cancel. Cancels
-        vastly outnumber fills in real markets, so that trade is usually worth it.
+        LAZY deletion, which is what real engines do. This used to splice the
+        order out of the middle of its deque with `deque.remove()`, which is
+        O(orders at that level): cancelling at the front of a deep queue was
+        instant and cancelling at the back walked the whole thing. benchmark.py
+        found exactly that shape — a 1.9us median against a 170us p99, an 88x
+        gap, on the operation that dominates real order flow.
+
+        So: flag the order dead, drop its id, decrement the level's live count,
+        and leave the object where it is. The matching loop throws tombstones
+        away when they surface at the front of a queue, which is the one moment
+        the work is unavoidable anyway. Nothing walks anything here, so the
+        cost no longer depends on where in the queue the order was sitting.
+
+        What it costs is memory: a cancelled order occupies its slot until the
+        matching loop reaches it, and a level that never trades never reaches
+        it. The bound is the whole point of _drop_live() deleting an emptied
+        level outright — that drops its deque, tombstones and all. benchmark.py
+        measures the leftovers rather than assuming they stay small.
         """
         order = self._by_id.pop(order_id, None)
-        if order is None:
+        if order is None or not order.active:
             return False
 
-        book = self.bids if order.side is Side.BUY else self.asks
-        queue = book.get(order.price)
-        if queue is None:
-            return False
-
-        try:
-            queue.remove(order)
-        except ValueError:
-            return False
-
-        if not queue:
-            del book[order.price]
+        order.active = False
+        self._drop_live(order.side, order.price)
         return True
 
     # ---------- matching internals ----------
@@ -299,6 +354,23 @@ class LimitOrderBook:
                     break
 
             queue = book[best]
+
+            # Tombstones from cancel() sit in the queue until something
+            # reaches them. This is that something: discarding one is a
+            # popleft, and each cancelled order is discarded exactly once
+            # over the life of the book, so the loop is amortized O(1) and
+            # not a scan.
+            while queue and not queue[0].active:
+                queue.popleft()
+            if not queue:
+                # Only reachable if a level's live count disagreed with its
+                # queue, which would be a bug in the bookkeeping rather than
+                # a state the book can legitimately be in. Clean up and keep
+                # going rather than raise inside a matching loop.
+                book.pop(best, None)
+                self._side_state(opposite)[3].pop(best, None)
+                continue
+
             resting = queue[0]
 
             if (incoming.participant_id is not None
@@ -311,9 +383,9 @@ class LimitOrderBook:
                 # CANCEL_RESTING: pull the resting order, no trade, keep
                 # trying to match the incoming order against everyone else.
                 queue.popleft()
+                resting.active = False
                 self._by_id.pop(resting.order_id, None)
-                if not queue:
-                    del book[best]
+                self._drop_live(opposite, best)
                 continue
 
             fill = min(incoming.quantity, resting.quantity)
@@ -330,9 +402,9 @@ class LimitOrderBook:
 
             if resting.quantity == 0:
                 queue.popleft()
+                resting.active = False
                 self._by_id.pop(resting.order_id, None)
-                if not queue:
-                    del book[best]
+                self._drop_live(opposite, best)
 
         return trades
 
@@ -345,16 +417,14 @@ class LimitOrderBook:
         would push a duplicate every time and the heap would grow forever
         even though the number of distinct prices never changes.
         """
-        if order.side is Side.BUY:
-            book, heap, live, sign = self.bids, self._bid_heap, self._bid_in_heap, -1.0
-        else:
-            book, heap, live, sign = self.asks, self._ask_heap, self._ask_in_heap, 1.0
+        book, heap, in_heap, live, sign = self._side_state(order.side)
 
         book.setdefault(order.price, deque()).append(order)
         self._by_id[order.order_id] = order
+        live[order.price] = live.get(order.price, 0) + 1
 
-        if order.price not in live:
-            live.add(order.price)
+        if order.price not in in_heap:
+            in_heap.add(order.price)
             heapq.heappush(heap, sign * order.price)
 
     # ---------- convenience ----------

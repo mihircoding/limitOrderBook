@@ -1,6 +1,6 @@
 # Results
 
-All 42 tests pass (`python -m pytest -q`). Numbers below are `python run_simulation.py`:
+All 69 tests pass (`python -m pytest -q`). Numbers below are `python run_simulation.py`:
 50,000 events, seed 7, book seeded with 5 levels of 100 shares either side of 100.00.
 
 ```
@@ -154,32 +154,66 @@ to best-price lookup alone.
 
 | levels | scan (ev/s) | heap (ev/s) |
 |---|---|---|
-| 10 | 91,104 | 97,775 |
-| 50 | 90,542 | 101,333 |
-| 100 | 80,150 | 96,828 |
-| 500 | 36,821 | 93,223 |
-| 1,000 | 12,500 | 43,933 |
+| 10 | 73,727 | 80,720 |
+| 50 | 68,411 | 81,856 |
+| 100 | 62,227 | 79,588 |
+| 500 | 30,576 | 82,596 |
+| 1,000 | 17,492 | 79,948 |
 
-Scanning the price dict costs 7.3x throughput going from 10 to 1,000 levels. The heap costs
-2.2x over the same range, and what remains is mostly the simulator's own bookkeeping rather
-than the book's. In isolation the lookup itself is 33x faster at 1,000 levels (7,922ns → 239ns).
+Scanning the price dict costs 4.2x throughput going from 10 to 1,000 levels. The current book
+costs nothing measurable over the same range — 80,720 against 79,948, which is inside the noise.
+In isolation the lookup itself is 29x faster at 1,000 levels (8,669ns → 302ns).
 
-Per-operation latency at 500 levels, microseconds:
+That right-hand column used to fall off too, by 2.2x across the same sweep. What was left after
+the heaps fixed best-price lookup was cancellation, and this is the section where it got found.
+
+### The cancel tail, and what fixed it
+
+Per-operation latency at 500 levels, microseconds, as it stood before:
 
 | operation | n | p50 | p99 | max |
 |---|---|---|---|---|
 | add | 12,063 | 4.22 | 15.49 | 157.15 |
-| cancel | 4,946 | 1.94 | 170.38 | 469.48 |
+| cancel | 4,946 | 1.94 | **170.38** | 469.48 |
 | market | 2,991 | 13.44 | 43.92 | 704.00 |
 
-The interesting row is cancel: the fastest median operation in the book and the worst tail, an
-88x p50-to-p99 gap. `cancel()` finds the order in O(1) through `_by_id` and then calls
-`deque.remove()`, which is O(orders resting at that price level). Cancelling at the front of a
-queue is instant; cancelling at the back of a deep one walks it. Real flow is mostly cancels, so
-this is the next bottleneck, and it is the one the code's own docstring named before anything
-was measured. Fixing it means lazy deletion on orders too — flag the order dead and let the
-matching loop skip it — which is a bigger change than the heaps, since `depth()`,
-`_fillable_quantity()` and `_match()` would all have to learn to ignore dead orders.
+Cancel was the fastest median operation in the book and had by far the worst tail — an 88x
+p50-to-p99 gap. The cause is one line: `cancel()` found the order in O(1) through `_by_id` and
+then called `deque.remove()`, which is O(orders resting at that price level). Cancelling at the
+front of a queue was instant; cancelling at the back of a deep one walked the whole queue. The
+caller neither chose their queue position nor can see it, so the same API call cost 2μs or 170μs
+depending on something invisible — and in real equity flow, well over 90% of orders are cancelled
+rather than filled, so this was the hot path wearing the worst distribution.
+
+The fix is the same idea the heaps already used: **don't delete, tombstone**. `cancel()` flags
+the order inactive, drops its id, decrements the level's live-order count, and returns. The
+order stays physically in its deque until the matching loop reaches it and throws it away, which
+is the one moment the work was unavoidable anyway. Per-level live counts (`_bid_live` /
+`_ask_live`) are what keep this honest: when the last live order at a price goes, the price key
+is deleted in O(1) — so `best_bid()`, `depth()` and the heaps never see a level that nobody is
+quoting, and the dropped deque takes its tombstones with it.
+
+Same flow, both implementations timed in the same process (`EagerCancelBook` restores the old
+`deque.remove()` and overrides nothing else):
+
+| cancel() | p50 | p99 | max | p99/p50 |
+|---|---|---|---|---|
+| eager (splice the deque) | 2.09 | 79.62 | 131.81 | 38x |
+| lazy (tombstone) | **0.89** | **3.21** | **43.62** | **4x** |
+
+The median halves, which was not the point. The 99th percentile falls by 25x and the ratio
+between them goes from 38x to 4x, which was. A matching engine is judged on its tail: a venue
+whose cancels are usually fast and occasionally 80μs is a venue that occasionally fails to pull
+a quote in time, and the times it fails are exactly the busy ones.
+
+The cost is memory, and rather than assert it stays bounded the benchmark counts it: after
+20,000 events at 500 levels the book is holding **1,787 tombstones against 4,065 live orders**,
+worst single level 368. They are freed two ways — the matching loop discards them as it passes,
+and an emptied level drops its whole deque at once.
+
+`tests/test_lazy_cancel.py` runs the lazy book and the eager one through identical random flow
+and compares every trade and both quotes after every event, because an optimization that changes
+an answer is not an optimization.
 
 These are single-run numbers from CPython on a shared VM and they wobble 10-20% between runs.
 The shape of the curves is the result; the absolute figures are not.
@@ -187,7 +221,7 @@ The shape of the curves is the result; the absolute figures are not.
 ## What isn't modeled
 
 - One symbol, one venue. No routing, no NBBO, no Reg NMS.
-- Limit and market orders only — no stops, icebergs, IOC/FOK, pegged, or auction orders.
+- Limit, market, IOC and FOK orders — no stops, icebergs, pegged, or auction orders.
 - No opening/closing auction, which is where a large share of real volume actually trades, under
   entirely different rules.
 - No latency, so nothing in this project touches the actual subject of low-latency trading.

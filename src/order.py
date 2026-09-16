@@ -52,6 +52,14 @@ class Order:
     timestamp: int
     participant_id: str | None = None
 
+    # Set False by LimitOrderBook.cancel(). The order stays physically in its
+    # deque until the matching loop reaches it and throws it away - a
+    # tombstone, which is how production engines get an O(1) cancel. Nothing
+    # outside the book should read this: a cancelled order is gone as far as
+    # every public method is concerned, and this flag is the mechanism, not
+    # the interface.
+    active: bool = True
+
     def __post_init__(self):
         self.price = to_tick(self.price)
         if self.quantity <= 0:
