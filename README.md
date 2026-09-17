@@ -10,13 +10,14 @@ strategy at all. The book still produces a realistic spread distribution, concav
 and a mid price that mean-reverts at short horizons exactly the way real equity data does. None
 of those were programmed in. They're properties of the matching rules.
 
-69 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
+80 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q          # 69 passed
+python -m pytest -q          # 80 passed
 python run_simulation.py     # 50k events, writes simulation.png
 python benchmark.py          # throughput and latency, against the older implementations
+python latency_study.py      # what a 15us disadvantage costs a market maker
 ```
 
 ![Emergent spread, impact and variance scaling](simulation.png)
@@ -145,17 +146,37 @@ What it produced over 50,000 events (details and numbers in [RESULTS.md](RESULTS
 
 ```
 ├── run_simulation.py    # driver: spread, depth, impact, variance scaling
+├── latency_study.py     # driver: two market makers, different wire lengths
 ├── src/
 │   ├── order.py         # Order and Trade types, tick rounding
 │   ├── orderbook.py     # the matching engine
+│   ├── latency.py       # per-participant latency; the book serves arrival order
 │   └── simulator.py     # zero-intelligence order flow
 ├── benchmark.py         # profiling: throughput vs depth, latency percentiles
-└── tests/               # 69 tests, written as matching scenarios
+└── tests/               # 80 tests, written as matching scenarios
 ```
 
 `tests/test_orderbook.py` is worth reading as the specification — each test is one rule of the
 matching algorithm stated as an executable scenario (maker pricing, FIFO at a level, sweeping
 levels in price order, partial fill remainder resting, cancels preserving queue position).
+
+### Latency: the engine serves arrivals, not decisions
+
+A matching engine has no idea when you decided to send an order. It sees a packet arrive and it
+serves arrivals in order, which is the entire reason microseconds are worth money.
+`src/latency.py` models that with a priority queue keyed by `(arrival, sequence)`, where arrival
+is submission time plus a per-participant draw — a hard floor plus an exponential tail, since a
+symmetric distribution would imply messages beating the speed of light. Ties break on submission
+sequence, standing in for the port ordering a real venue uses; breaking them by decision time
+would give back exactly the advantage being measured.
+
+`latency_study.py` runs two market makers with identical logic, identical information and
+identical size through the same flow, changing only how long their messages take to arrive. At
+equal latency they split the run's P&L 331,455 ticks to 338,578. Give one of them a 15µs edge and
+it becomes 601,827 to 66,427, with the total almost unchanged — latency doesn't create the money,
+it decides who collects it. The slow maker's volume barely falls; what changes is that 59.7% of
+what it trades is now informed flow against the fast maker's 21.1%. [RESULTS.md](RESULTS.md)
+section 6 has the sweep and the caveats.
 
 ## Design notes
 
@@ -274,8 +295,13 @@ absolute nanoseconds.
   under different rules (a single clearing price, not continuous matching).
 - ~~No self-trade prevention~~ - `participant_id` + `StpPolicy` on every order type (see Design
   notes). Still no fee/rebate model, no other risk checks (position limits, fat-finger checks).
-- No latency. Every order arrives instantly and in submission order, which erases the entire
-  subject matter of low-latency trading.
+- ~~No latency~~ — `src/latency.py` puts messages on a wire and the book serves them in arrival
+  order, not submission order. The simulator in sections 1-5 of RESULTS.md still runs with no
+  latency at all, so those numbers describe a market where everyone is infinitely fast.
+- Latency is one-way and applied once: no gateway queueing, no size-dependent serialization, no
+  engine processing time, and no separate market-data delay. Co-location is bought mostly to
+  *see* faster, and that half isn't modeled — the makers in the latency study observe events
+  instantly and are only delayed on the way out.
 - Zero-intelligence agents never reprice, so passive orders pile up far from the touch in a way
   real books don't — the depth profile is the least realistic output here, and RESULTS.md says
   why.

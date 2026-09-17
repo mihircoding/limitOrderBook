@@ -1,6 +1,7 @@
 # Results
 
-All 69 tests pass (`python -m pytest -q`). Numbers below are `python run_simulation.py`:
+All 80 tests pass (`python -m pytest -q`). Numbers below are `python run_simulation.py`
+(section 6 is `python latency_study.py`):
 50,000 events, seed 7, book seeded with 5 levels of 100 shares either side of 100.00.
 
 ```
@@ -218,13 +219,111 @@ an answer is not an optimization.
 These are single-run numbers from CPython on a shared VM and they wobble 10-20% between runs.
 The shape of the curves is the result; the absolute figures are not.
 
+## 6. What being slow costs, in ticks
+
+The list of things this project doesn't model has always started with latency, with the note
+that its absence means nothing here touches the actual subject of low-latency trading. That is
+now `src/latency.py` and `python latency_study.py`.
+
+The model rests on one fact about a matching engine: **it does not know when you decided.** It
+knows when your packet arrived, and it serves arrivals in order. `MessageBus` is a priority queue
+keyed by (arrival, sequence), where arrival is submission time plus a per-participant latency
+draw — a hard floor plus an exponential tail, because a symmetric distribution would imply
+messages arriving faster than physics allows. The sequence number breaks ties, which is not a
+detail: ordering a tie by submission time would hand it to whoever decided first, which is
+exactly the advantage latency is supposed to take away.
+
+The experiment is the smallest one containing the real effect. Two market makers quote 100
+shares one tick either side of fair value. Identical logic, identical information, identical
+size — the only difference between them is how long their messages take to reach the book. Fair
+value jumps three ticks 25% of the time; informed flow reacts to the jump in 50µs; uninformed
+flow arrives at random. Every fill is marked against fair value immediately afterwards, so one
+tick per share means the full quoted edge was captured and nothing was lost to information.
+
+The fast maker is fixed at 10µs. Only the slow one moves.
+
+```
+fast maker (10us)
+ slow maker | quoted vol  toxic%  passive  took vol  taking     net      total
+       10us |    362,766   34.0%    0.779    24,906   1.966   0.855    331,455
+       25us |    456,710   21.1%    1.000    72,835   1.991   1.136    601,827
+       50us |    451,833   21.3%    1.000    77,671   1.990   1.145    606,482
+      100us |    445,532   21.6%    0.999    78,221   1.990   1.147    600,977
+      250us |    423,473   22.7%    0.997    79,828   1.993   1.155    581,085
+     1000us |    311,305   31.1%    0.983    89,023   1.993   1.207    483,365
+
+slow maker
+ slow maker | quoted vol  toxic%  passive  took vol  taking     net      total
+       10us |    359,007   33.8%    0.793    26,799   2.005   0.878    338,578
+       25us |    283,433   59.7%    0.234         0   0.000   0.234     66,427
+       50us |    251,190   30.9%    0.082         0   0.000   0.082     20,579
+      100us |    256,869   30.5%    0.102         0   0.000   0.102     26,171
+      250us |    276,415   28.9%    0.186         0   0.000   0.186     51,281
+     1000us |    373,766   23.8%    0.475       491  -0.754   0.473    176,982
+```
+
+`passive` is P&L per share on the maker's own resting quotes; `taking` is P&L per share where it
+was the aggressor; `total` is the run's whole P&L in ticks.
+
+**Fifteen microseconds is worth 80% of the business.** The first row is the control: identical
+latency, and the two makers split the run almost exactly, 331,455 ticks against 338,578. Move one
+of them from 10µs to 25µs and the split becomes 601,827 against 66,427. Nothing else changed —
+same flow, same seed, same quoting logic, same size. At 50µs the slow maker keeps 20,579 ticks,
+6% of what it earned at parity.
+
+**And the total barely moves.** 670,033 ticks at parity, 668,254 at a 15µs gap. Latency does not
+create value here; it decides who collects value that the flow was going to pay either way. That
+is the cleanest statement this project can make about why firms spend money on microwave towers,
+and it comes out of the accounting rather than from an argument.
+
+**The slow maker does not trade less. It trades worse.** At 25µs it still fills 283,433 shares on
+its own quotes — 78% of its volume at parity — and earns 0.234 ticks on each instead of 0.793.
+Look at the `toxic%` column on that row: 59.7% of what it traded came from informed flow, against
+21.1% for the fast maker on the same run. It is not being excluded from the market. It is being
+selected into the half of the market that costs money. A maker looking only at fill rates would
+see a healthy business.
+
+**The fast maker's second income stream is the interesting one.** Its `passive` number is 1.000 —
+a perfect score, never adversely selected at all, because its cancel always beats the informed
+order. But look at `took vol`: 72,835 shares where it was the aggressor, at 1.991 ticks each. Its
+own requote is what takes them. After a three-tick jump down, the new ask it posts sits *below*
+where the competition's stale bid still is, so posting it crosses. That is latency arbitrage, and
+it was not written into the maker's logic — the maker only knows how to cancel and re-post around
+fair value. It falls out of being first.
+
+**Why the slow maker's curve flattens and then turns up, and why that isn't good news.** From
+25µs onward it is already slower than the pick-off, and being slower still does not make the
+pick-off worse: the loss per jump is capped at the size it quoted. Past that point the variation
+in the column is not about toxicity at all, it is about queue position for ordinary flow — and at
+1000µs the maker is quoting around a fair value a full round stale, which is a different problem
+(uncompetitive rather than picked off) that this model's once-per-round value updates do not
+represent well. The monotone part of the story is 10µs to 50µs. The tail of the sweep is in the
+table because leaving it out would be a nicer chart and a worse result.
+
+### What this does not model
+
+- **One-way latency, applied once.** No gateway queueing, no serialization delay that grows with
+  message size, no matching-engine processing time, and no separate market-data latency — the
+  makers here see the jump instantly and only their *outbound* messages are delayed. Real
+  co-location is bought mostly to see faster, and that half is missing.
+- **The makers are stationary.** No inventory skew, no spread widening when toxicity rises, no
+  pulling out of the market entirely. A real slow maker's response to this table would be to
+  quote wider, and quoting wider is how it survives — which means the 94% figure is what happens
+  to a maker that refuses to adapt, not a law.
+- **Fair value is exogenous and public.** Both makers see the same jump at the same instant, which
+  is deliberate: it isolates latency from information. In a real market the fast participant
+  usually has both.
+
 ## What isn't modeled
 
 - One symbol, one venue. No routing, no NBBO, no Reg NMS.
 - Limit, market, IOC and FOK orders — no stops, icebergs, pegged, or auction orders.
 - No opening/closing auction, which is where a large share of real volume actually trades, under
   entirely different rules.
-- No latency, so nothing in this project touches the actual subject of low-latency trading.
+- ~~No latency~~ — `src/latency.py` puts messages on the wire and the book serves them in
+  arrival order; section 6 measures what a 15µs disadvantage does to a market maker. The
+  simulator in sections 1-5 still runs with no latency at all, so every number in those sections
+  describes a market where everyone is infinitely fast.
 - No fees or rebates. Self-trade prevention exists now (`participant_id` + `StpPolicy` on every
   order type - see README's Design notes and `tests/test_stp.py`), but no other risk checks
   (position limits, fat-finger checks). The zero-intelligence simulator below still doesn't
