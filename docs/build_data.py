@@ -1,7 +1,8 @@
 """Builds docs/data.js for the GitHub Pages site.
 
-Same 50,000-event run RESULTS.md reports, dumped as JSON so the site plots
-the actual simulation output rather than numbers retyped into HTML. Re-run
+Same 50,000-event run RESULTS.md reports, plus the latency_study.py sweep,
+dumped as JSON so the site plots the actual simulation output rather than
+numbers retyped into HTML. Re-run
 after changing the matching engine and the charts move with it:
 
     python docs/build_data.py
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmark import (EagerCancelBook, ScanBook, latency_percentiles,
                        time_quotes, time_simulation, tombstone_census)
+import latency_study
 from run_simulation import N_EVENTS, SEED
 from src.order import Side
 from src.orderbook import LimitOrderBook
@@ -87,6 +89,32 @@ def main():
         "census": tombstone_census(LimitOrderBook, 500),
     }
 
+    print(f"latency study ({len(latency_study.SLOW_LATENCIES)} races)...")
+    races = []
+    for slow_us in latency_study.SLOW_LATENCIES:
+        r = latency_study.run(slow_us)
+        row = {"slow_us": slow_us}
+        for name in ("fast", "slow"):
+            m = r[name]
+            row[name] = {
+                "pnl": round(m["pnl"] / latency_study.TICK),   # whole run, in ticks
+                "passive_volume": m["passive_volume"],
+                "active_volume": m["active_volume"],
+                "toxic_share": round(m["toxic_share"], 4),
+                "passive_ticks": round(m["passive_ticks"], 3),
+                "active_ticks": round(m["active_ticks"], 3),
+            }
+        races.append(row)
+    latency = {
+        "fast_us": latency_study.FAST_US,
+        "rounds": latency_study.N_ROUNDS,
+        "quote_size": latency_study.QUOTE_SIZE,
+        "p_jump": latency_study.P_JUMP,
+        "jump_ticks": latency_study.JUMP_TICKS,
+        "taker_us": latency_study.TAKER_LATENCY_US,
+        "races": races,
+    }
+
     data = {
         "meta": {"events": N_EVENTS, "seed": SEED,
                  "trades": result["n_trades"], "volume": result["volume"]},
@@ -104,6 +132,7 @@ def main():
         "variance": {"rows": var_rows, "hurst": round(float(hurst), 3),
                      "acf1": round(acf1, 4)},
         "perf": perf,
+        "latency": latency,
     }
 
     OUT.write_text("window.DATA = " + json.dumps(data, separators=(",", ":")) + ";\n",
@@ -114,6 +143,9 @@ def main():
     deep = perf["depths"][-1]
     print(f"  perf at {deep['levels']} levels: scan {deep['scan_eps']:,} ev/s -> "
           f"heap {deep['heap_eps']:,} ev/s")
+    par, gap = races[0], races[1]
+    print(f"  latency: parity {par['fast']['pnl']:,} / {par['slow']['pnl']:,} ticks, "
+          f"{gap['slow_us']:.0f}us {gap['fast']['pnl']:,} / {gap['slow']['pnl']:,}")
 
 
 if __name__ == "__main__":

@@ -277,7 +277,7 @@ is the cleanest statement this project can make about why firms spend money on m
 and it comes out of the accounting rather than from an argument.
 
 **The slow maker does not trade less. It trades worse.** At 25µs it still fills 283,433 shares on
-its own quotes — 78% of its volume at parity — and earns 0.234 ticks on each instead of 0.793.
+its own quotes — 79% of what it filled on them at parity — and earns 0.234 ticks on each instead of 0.793.
 Look at the `toxic%` column on that row: 59.7% of what it traded came from informed flow, against
 21.1% for the fast maker on the same run. It is not being excluded from the market. It is being
 selected into the half of the market that costs money. A maker looking only at fill rates would
@@ -308,8 +308,8 @@ table because leaving it out would be a nicer chart and a worse result.
   co-location is bought mostly to see faster, and that half is missing.
 - **The makers are stationary.** No inventory skew, no spread widening when toxicity rises, no
   pulling out of the market entirely. A real slow maker's response to this table would be to
-  quote wider, and quoting wider is how it survives — which means the 94% figure is what happens
-  to a maker that refuses to adapt, not a law.
+  quote wider, and quoting wider is how it survives — which means the 50µs row, where it keeps 6%
+  of its parity P&L, is what happens to a maker that refuses to adapt, not a law.
 - **Fair value is exogenous and public.** Both makers see the same jump at the same instant, which
   is deliberate: it isolates latency from information. In a real market the fast participant
   usually has both.
@@ -326,7 +326,7 @@ table because leaving it out would be a nicer chart and a worse result.
   describes a market where everyone is infinitely fast.
 - No fees or rebates. Self-trade prevention exists now (`participant_id` + `StpPolicy` on every
   order type - see README's Design notes and `tests/test_stp.py`), but no other risk checks
-  (position limits, fat-finger checks). The zero-intelligence simulator below still doesn't
-  assign participant identities to its agents, so none of the numbers below exercise it.
+  (position limits, fat-finger checks). The zero-intelligence simulator in sections 1-5 still doesn't
+  assign participant identities to its agents, so none of the numbers above exercise it.
 - Agents have no memory, no inventory, and no information — which is exactly what makes it a
   valid null model, and exactly what makes the depth magnitudes wrong.

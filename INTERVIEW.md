@@ -243,9 +243,9 @@ data if you have it — the real test is a byte-identical trade log.
 
 **"What's missing from your book compared to a real exchange?"**
 Auctions (a large share of daily volume trades at the open and close under different rules —
-a single clearing price, not continuous matching), order types beyond limit/market, self-trade
-prevention, fees, risk checks, multi-venue routing and NBBO obligations, and latency — which
-erases the entire subject of low-latency trading from the model.
+a single clearing price, not continuous matching), order types beyond limit/market/IOC/FOK,
+fees, risk checks, and multi-venue routing and NBBO obligations. Latency exists only in the
+market-maker study, and only on the outbound side: nobody sees market data late.
 
 **"Why do >90% of orders get cancelled?"**
 Mostly repositioning, not indecision. Market makers reprice as the mid moves, chase queue
@@ -257,11 +257,12 @@ should be chosen to make cancel O(1) even at the cost of memory.
 
 ## Things to admit before they ask
 
-- Best-price lookup is O(levels), not O(1). I know the fixes and haven't profiled to justify one.
+- Best-price lookup was O(levels) until `benchmark.py` measured it; it's a lazy-deletion heap now.
 - Ticked floats, not integer ticks. I know why that's wrong in production.
-- No latency model at all, so nothing here is about low-latency trading despite the topic.
+- Latency is modeled only in `latency_study.py`, one-way and outbound. The zero-intelligence
+  simulator still delivers every order instantly.
 - The depth *magnitudes* are an artifact: zero-intelligence agents never reprice, so passive
   orders pile up far from the touch in a way no real book does. The shape is emergent; the size
   isn't.
 - Impact exponent 0.95 vs the empirical ~0.5. The mechanism is right, the strength isn't.
-- Single symbol, no auctions, no fees, no order types beyond the two basic ones.
+- Single symbol, no auctions, no fees, no order types beyond limit, market, IOC and FOK.

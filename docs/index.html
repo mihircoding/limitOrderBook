@@ -86,7 +86,8 @@ input[type=range]{width:100%;accent-color:var(--blue)}
 ul{color:var(--ink2);padding-left:20px;margin:0 0 14px}
 li{margin-bottom:7px}
 footer{padding:36px 0 56px;border-top:1px solid var(--line);color:var(--ink3);font-size:13.5px}
-@media(max-width:860px){.grid2{grid-template-columns:1fr}h1{font-size:30px}}
+.grid2>*{min-width:0}
+@media(max-width:860px){.grid2{grid-template-columns:1fr!important}h1{font-size:30px}}
 </style>
 
 <style>
@@ -310,6 +311,54 @@ input[type=number]{padding:7px 10px;border:1px solid var(--line2);border-radius:
 </div>
 </section>
 
+<section id="latency">
+<div class="wrap">
+  <div class="eyebrow">Latency</div>
+  <h2>Two identical market makers, one longer wire</h2>
+  <p class="lede">The book used to process every order the instant it was created, which left out the thing low-latency trading is about. <span class="mono">src/latency.py</span> puts messages on a wire: each one reaches the book at its send time plus a per-participant delay, and the book serves them in arrival order. A matching engine doesn't know when you decided, only when your packet arrived.</p>
+
+  <p>The experiment in <span class="mono">latency_study.py</span> is the smallest one that contains the effect. Two market makers quote <span id="l-size">&mdash;</span> shares one tick either side of fair value. Same logic, same information, same size, same flow, same seed; only the wire differs. Fair value jumps <span id="l-jump">&mdash;</span> ticks in <span id="l-pjump">&mdash;</span> of rounds, informed flow reacts to the jump in <span id="l-taker">&mdash;</span>, and uninformed market orders arrive at random. Every fill is marked against fair value right after it happens, so one tick per share is the full quoted edge. The fast maker stays at <span id="l-fast">&mdash;</span>; only the slow one moves.</p>
+
+  <div class="cards">
+    <div class="card"><div class="k">Latency gap</div><div class="v" id="l-gap">&mdash;</div><div class="s" id="l-gap-s">&mdash;</div></div>
+    <div class="card"><div class="k">Slow maker's P&amp;L</div><div class="v red" id="l-slowchg">&mdash;</div><div class="s" id="l-slowchg-s">&mdash;</div></div>
+    <div class="card"><div class="k">Both makers combined</div><div class="v" id="l-totchg">&mdash;</div><div class="s" id="l-totchg-s">&mdash;</div></div>
+    <div class="card"><div class="k">Slow maker's fills that were informed</div><div class="v red" id="l-toxic">&mdash;</div><div class="s" id="l-toxic-s">&mdash;</div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <h3>P&amp;L as the gap grows</h3>
+      <div class="chart"><canvas id="c-lat-pnl"></canvas></div>
+      <p class="cap">Whole-run P&amp;L in ticks, one race per slow-maker latency. The first pair is the control: equal latency, and they split it <span id="l-par"></span>. From the next step on, the slow maker is behind the informed flow and the fast maker collects what it gives up.</p>
+    </div>
+    <div class="panel">
+      <h3>Who the slow maker ends up trading with</h3>
+      <div class="chart"><canvas id="c-lat-toxic"></canvas></div>
+      <p class="cap">Share of each maker's quoted volume that came from informed flow. <strong style="color:var(--ink)">The slow maker doesn't trade much less; it trades worse.</strong> <span id="l-vol"></span> A maker looking only at fill rates would see a healthy business.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <p><strong>The total barely moves.</strong> <span id="l-total"></span> Latency doesn't create the money here. It decides who collects money the flow was going to pay either way, and that comes out of the accounting rather than from an argument.</p>
+  </div>
+
+  <div class="grid2" style="margin-top:26px">
+    <div>
+      <h3>The fast maker's second income</h3>
+      <p><span id="l-arb"></span> After a three-tick jump down, its new ask lands below where the slow maker's stale bid still sits, so posting it crosses. Nobody wrote that into the maker; it only knows how to cancel and re-post around fair value. It falls out of being first.</p>
+      <p>The slow maker's P&amp;L bottoms out at 50&micro;s and climbs back by 1,000&micro;s. That isn't slowness paying off. Once it is slower than the informed flow, being slower still doesn't make the pick-off worse, because the loss per jump is capped at the size it quoted. At 1,000&micro;s it is quoting around a fair value a full round stale, which the model's once-per-round updates don't represent well. The part of the curve that means something is 10&micro;s to 50&micro;s; the rest stays in the table anyway.</p>
+    </div>
+    <div>
+      <div class="scroll"><table id="t-lat"><thead><tr><th class="n">Slow maker</th><th class="n">Fast P&amp;L</th><th class="n">Slow P&amp;L</th><th class="n">Slow informed</th><th class="n">Fast took</th></tr></thead><tbody></tbody></table></div>
+      <p class="cap">P&amp;L in ticks. "Slow informed" is the share of the slow maker's quoted volume that came from informed flow; "fast took" is shares where the fast maker was the aggressor, almost all of it a requote crossing a stale quote.</p>
+    </div>
+  </div>
+
+  <p style="font-size:13.5px;color:var(--ink3)">Latency is one-way and outbound only: both makers see the jump instantly, and there is no gateway queueing, market-data delay or engine processing time. Co-location is bought mostly to see faster, and that half is missing. The makers also never adapt &mdash; a real slow maker would quote wider, so the slow column is what happens to one that doesn't.</p>
+</div>
+</section>
+
 <section>
 <div class="wrap">
   <div class="eyebrow">Limitations</div>
@@ -324,7 +373,7 @@ input[type=number]{padding:7px 10px;border:1px solid var(--line2);border-radius:
     </div>
     <div>
       <ul>
-        <li><strong style="color:var(--ink)">No latency.</strong> Every order arrives instantly and in submission order, which erases the entire subject matter of low-latency trading.</li>
+        <li><strong style="color:var(--ink)">Latency only in the latency study.</strong> The zero-intelligence simulator still delivers every order instantly, so the stylized facts above describe a market where everyone is infinitely fast.</li>
         <li>Self-trade prevention exists (participant IDs, two cancellation policies); fees, rebates and other risk checks don't.</li>
         <li>Agents have no memory, inventory or information. That is what makes it a valid null model, and what makes the depth magnitudes wrong.</li>
       </ul>
@@ -695,6 +744,76 @@ if (P.cancel) {
   document.getElementById('x-tomb').textContent =
     `after 20,000 events at 500 levels the book holds ${c.tombstones.toLocaleString()} ` +
     `tombstones against ${c.live_orders.toLocaleString()} live orders, worst single level ${c.worst_level}`;
+}
+
+// --- latency study ---
+const L = D.latency;
+if (L) {
+  const us = v => v.toLocaleString() + 'µs';
+  const pct = (v, d = 1) => (v * 100).toFixed(d) + '%';
+  const races = L.races, par = races[0], gap = races[1];
+  const parTot = par.fast.pnl + par.slow.pnl, gapTot = gap.fast.pnl + gap.slow.pnl;
+  const set = (id, v) => { document.getElementById(id).textContent = v; };
+
+  set('l-size', L.quote_size);
+  set('l-jump', L.jump_ticks.toFixed(0));
+  set('l-pjump', pct(L.p_jump, 0));
+  set('l-taker', us(L.taker_us));
+  set('l-fast', us(L.fast_us));
+
+  set('l-gap', us(gap.slow_us - par.slow_us));
+  set('l-gap-s', `${us(L.fast_us)} against ${us(gap.slow_us)}, nothing else changed`);
+  set('l-slowchg', '−' + pct(1 - gap.slow.pnl / par.slow.pnl, 0));
+  set('l-slowchg-s', `${par.slow.pnl.toLocaleString()} → ${gap.slow.pnl.toLocaleString()} ticks`);
+  const totChg = gapTot / parTot - 1;
+  set('l-totchg', (totChg < 0 ? '−' : '+') + pct(Math.abs(totChg)));
+  set('l-totchg-s', `${parTot.toLocaleString()} → ${gapTot.toLocaleString()} ticks`);
+  set('l-toxic', pct(gap.slow.toxic_share));
+  set('l-toxic-s', `${pct(gap.fast.toxic_share)} for the fast maker, same run`);
+
+  set('l-par', `${par.fast.pnl.toLocaleString()} ticks to ${par.slow.pnl.toLocaleString()}`);
+  set('l-vol', `At ${us(gap.slow_us)} it still fills ${gap.slow.passive_volume.toLocaleString()} shares on its own quotes, ` +
+    `${pct(gap.slow.passive_volume / par.slow.passive_volume, 0)} of what it filled at parity, but earns ` +
+    `${gap.slow.passive_ticks.toFixed(3)} ticks a share on them instead of ${par.slow.passive_ticks.toFixed(3)}.`);
+  set('l-total', `${parTot.toLocaleString()} ticks between the two makers at equal latency, ` +
+    `${gapTot.toLocaleString()} with a ${us(gap.slow_us - par.slow_us)} gap.`);
+  set('l-arb', `At ${us(gap.slow_us)} the fast maker earns ${gap.fast.passive_ticks.toFixed(3)} ticks a share on its quotes, ` +
+    `never picked off, because its cancel always beats the informed order. It also took ` +
+    `${gap.fast.active_volume.toLocaleString()} shares as the aggressor, at ${gap.fast.active_ticks.toFixed(3)} ticks each.`);
+
+  const labels = races.map(r => r.slow_us === L.fast_us ? us(r.slow_us) + ' (equal)' : us(r.slow_us));
+  const pair = (fmt, key) => [
+    {label: `fast maker (${us(L.fast_us)})`, data: races.map(r => key(r.fast)), backgroundColor: c.blue, borderRadius: 2},
+    {label: 'slow maker', data: races.map(r => key(r.slow)), backgroundColor: c.amber, borderRadius: 2}
+  ];
+  const latOpts = (yTitle, tick, tip) => ({
+    responsive: true, maintainAspectRatio: false,
+    plugins: {legend: {labels: {color: c.ink2, boxWidth: 10, boxHeight: 10, padding: 14}},
+              tooltip: {callbacks: {label: ctx => ctx.dataset.label + ': ' + tip(ctx.parsed.y)}}},
+    scales: {
+      x: {title: {display: true, text: 'slow maker latency', color: c.ink3}, grid: {display: false}, ticks: {color: c.ink3}},
+      y: {title: {display: true, text: yTitle, color: c.ink3}, grid: {color: c.line},
+          ticks: {color: c.ink3, callback: tick}, border: {display: false}, beginAtZero: true}
+    }
+  });
+
+  new Chart(document.getElementById('c-lat-pnl'), {
+    type: 'bar',
+    data: {labels, datasets: pair(null, m => m.pnl)},
+    options: latOpts('P&L (ticks)', v => (v / 1000) + 'k', v => v.toLocaleString() + ' ticks')
+  });
+  new Chart(document.getElementById('c-lat-toxic'), {
+    type: 'bar',
+    data: {labels, datasets: pair(null, m => m.toxic_share * 100)},
+    options: latOpts('informed share of quoted volume', v => v + '%', v => v.toFixed(1) + '%')
+  });
+
+  document.querySelector('#t-lat tbody').innerHTML = races.map(r => `
+    <tr><td class="n"><strong>${us(r.slow_us)}</strong></td>
+        <td class="n">${r.fast.pnl.toLocaleString()}</td>
+        <td class="n">${r.slow.pnl.toLocaleString()}</td>
+        <td class="n">${pct(r.slow.toxic_share)}</td>
+        <td class="n">${r.fast.active_volume.toLocaleString()}</td></tr>`).join('');
 }
 
 </script>
