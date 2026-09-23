@@ -300,6 +300,59 @@ in the column is not about toxicity at all, it is about queue position for ordin
 represent well. The monotone part of the story is 10µs to 50µs. The tail of the sweep is in the
 table because leaving it out would be a nicer chart and a worse result.
 
+### 6b. The venue's fees, which are a fifth of the edge
+
+Everything above trades for free. No exchange does. On US equity venues the maker-taker schedule
+pays for a resting fill and charges for taking, and at a top tier that is roughly +$0.0020 and
+−$0.0030 a share. The makers here quote one tick — one cent — either side of fair value, so the
+rebate is **a fifth of the entire edge they are working with**, and the study is not describing
+the business until it is charged. `src/fees.py` charges it, at three schedules: no fees, maker-taker,
+and an inverted venue (−$0.0010 maker, +$0.0002 taker) of the kind that pays for aggressive flow.
+
+Whole-run P&L in ticks, trading plus fees:
+
+```
+ slow maker |                no fees            maker-taker               inverted
+            |       fast        slow       fast        slow       fast        slow
+       10us |    331,455     338,578    396,536     402,340    295,676     303,213
+       25us |    601,827      66,427    671,318     123,113    557,613      38,083
+       50us |    606,482      20,579    673,547      70,817    562,852      -4,540
+      100us |    600,977      26,171    666,617      77,545    557,988         484
+      250us |    581,085      51,281    641,831     106,564    540,334      23,639
+     1000us |    483,365     176,982    518,919     251,588    454,015     139,615
+```
+
+**The rebate does not change who wins, and it changes whether the loser has a business.** The fast
+maker's advantage at 50µs is the same 30x with fees as without — fees are per share, and both
+makers do similar volume, so the subsidy lands on both of them. But the slow maker at 50µs earns
+20,579 ticks of trading P&L on 251,190 shares quoted, which is **$0.0008 a share**. A maker-taker
+venue paying $0.0020 nearly quadruples that. An inverted venue charging $0.0010 takes more than the
+strategy makes, and the run goes negative — the single negative cell in the table.
+
+That number has a name here: `breakeven_maker_rate()` solves for the maker rate at which a run nets
+to exactly zero.
+
+```
+ slow maker |                         fast |                         slow
+            |   trading P&L     break-even |   trading P&L     break-even
+       10us |       331,455       -0.0089$ |       338,578       -0.0092$
+       25us |       601,827       -0.0127$ |        66,427       -0.0023$
+       50us |       606,482       -0.0129$ |        20,579       -0.0008$
+      100us |       600,977       -0.0130$ |        26,171       -0.0010$
+      250us |       581,085       -0.0132$ |        51,281       -0.0019$
+     1000us |       483,365       -0.0147$ |       176,982       -0.0047$
+```
+
+Negative means it can afford to *pay* the venue that much per share. The fast maker can pay well
+over a cent; the 50µs maker can pay eight hundredths of a cent, which is less than an inverted
+venue charges. **Latency and venue choice are the same decision.** A slow maker belongs where
+quoting is subsidised; the fast one is indifferent, which is why it can afford to quote where the
+aggressive flow is.
+
+Two caveats worth stating. Rate cards are tiered by monthly volume and run to several pages —
+these are top-line numbers, not a quote. And a real maker facing an inverted venue's fee would
+widen its quote rather than keep paying, which this study's fixed one-tick edge does not let it do.
+
 ### What this does not model
 
 - **One-way latency, applied once.** No gateway queueing, no serialization delay that grows with
@@ -324,7 +377,9 @@ table because leaving it out would be a nicer chart and a worse result.
   arrival order; section 6 measures what a 15µs disadvantage does to a market maker. The
   simulator in sections 1-5 still runs with no latency at all, so every number in those sections
   describes a market where everyone is infinitely fast.
-- No fees or rebates. Self-trade prevention exists now (`participant_id` + `StpPolicy` on every
+- ~~No fees or rebates~~ — `src/fees.py` charges maker-taker and inverted schedules, and
+  section 6b shows the rebate is a fifth of the quoted edge and decides whether the slow maker has
+  a business at all. Sections 1-5 still trade for free. Self-trade prevention exists now (`participant_id` + `StpPolicy` on every
   order type - see README's Design notes and `tests/test_stp.py`), but no other risk checks
   (position limits, fat-finger checks). The zero-intelligence simulator in sections 1-5 still doesn't
   assign participant identities to its agents, so none of the numbers above exercise it.

@@ -20,6 +20,7 @@ reason latency is worth money.
 
 import numpy as np
 
+from src.fees import MAKER_TAKER, SCHEDULES, breakeven_maker_rate
 from src.latency import LatencyModel, MessageBus
 from src.order import Side, to_tick
 from src.orderbook import LimitOrderBook
@@ -219,6 +220,11 @@ def run(slow_us: float, seed: int = 0) -> dict:
                              if active_volume else 0.0),
             "ticks_per_share": (pnl_of(maker.fills) / volume / TICK
                                 if volume else 0.0),
+            # Fees are charged per share and this book's P&L is in ticks of
+            # $0.01, so a $0.0020 rebate is 0.2 ticks a share - a fifth of the
+            # entire quoted edge. Keeping the two apart lets the table show
+            # what the trades earned and what the venue paid for them.
+            "trading_pnl": pnl_of(maker.fills),
         }
     return out
 
@@ -245,6 +251,56 @@ def main() -> None:
                   f"{r['toxic_share']:>7.1%} {r['passive_ticks']:>8.3f} "
                   f"{r['active_volume']:>9,} {r['active_ticks']:>7.3f} "
                   f"{r['ticks_per_share']:>7.3f} {r['pnl'] / TICK:>10,.0f}")
+
+    print(f"\n{'=' * 78}")
+    print("The same race, with the venue's fees charged")
+    print(f"{'=' * 78}")
+    print("Nothing above pays an exchange a cent. Quoting is subsidised on a")
+    print("maker-taker venue and penalised on an inverted one, and at these")
+    print("sizes the rebate is a fifth of the whole quoted edge.\n")
+
+    head = (f"{'slow maker':>11} | " +
+            " ".join(f"{sched.name:>22}" for sched in SCHEDULES))
+    sub = (f"{'':>11} | " +
+           " ".join(f"{'fast':>10} {'slow':>11}" for _ in SCHEDULES))
+    print(head)
+    print(sub)
+    print("-" * len(sub))
+    for slow_us in SLOW_LATENCIES:
+        cells = []
+        for sched in SCHEDULES:
+            for who in ("fast", "slow"):
+                r = RESULTS[slow_us][who]
+                net = r["trading_pnl"] + sched.net(r["passive_volume"],
+                                                   r["active_volume"])
+                cells.append(f"{net / TICK:>10,.0f}" if who == "fast"
+                             else f"{net / TICK:>11,.0f}")
+        print(f"{slow_us:>9.0f}us | " + " ".join(cells))
+    print("\nWhole-run P&L in ticks, trading plus fees. Passive volume earns the")
+    print("maker side of the schedule; volume where the maker crossed to requote")
+    print("pays the taker side.")
+
+    print("\nWhat can each maker afford to pay the venue?")
+    print(f"{'slow maker':>11} | {'fast':>28} | {'slow':>28}")
+    print(f"{'':>11} | {'trading P&L':>13} {'break-even':>14} | "
+          f"{'trading P&L':>13} {'break-even':>14}")
+    print("-" * 74)
+    for slow_us in SLOW_LATENCIES:
+        cells = []
+        for who in ("fast", "slow"):
+            r = RESULTS[slow_us][who]
+            rate = breakeven_maker_rate(r["trading_pnl"], r["passive_volume"],
+                                        r["active_volume"],
+                                        taker_fee=MAKER_TAKER.taker)
+            cells.append(f"{r['trading_pnl'] / TICK:>13,.0f} "
+                         f"{rate:>+13.4f}$")
+        print(f"{slow_us:>9.0f}us | {cells[0]} | {cells[1]}")
+    print("\nThe break-even column is the maker rate at which that maker's whole run")
+    print("nets to zero, against a 30-mil taker fee. Negative means it can afford to")
+    print("PAY the venue that much per share; positive would mean it needs a rebate")
+    print("that large to survive. The 50us slow maker can afford $0.0008, which is")
+    print("less than an inverted venue's $0.0010 maker fee - which is exactly why it")
+    print("is the one negative number in the table above.")
 
     print("\n'quoted vol' is volume filled on this maker's own resting quotes;")
     print("'toxic%' is the share of that which came from informed flow.")

@@ -10,7 +10,7 @@ strategy at all. The book still produces a realistic spread distribution, concav
 and a mid price that mean-reverts at short horizons exactly the way real equity data does. None
 of those were programmed in. They're properties of the matching rules.
 
-80 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
+88 tests. Results in [RESULTS.md](RESULTS.md), interview notes in [INTERVIEW.md](INTERVIEW.md).
 
 ```bash
 pip install -r requirements.txt
@@ -151,9 +151,10 @@ What it produced over 50,000 events (details and numbers in [RESULTS.md](RESULTS
 │   ├── order.py         # Order and Trade types, tick rounding
 │   ├── orderbook.py     # the matching engine
 │   ├── latency.py       # per-participant latency; the book serves arrival order
+│   ├── fees.py          # maker-taker and inverted schedules; break-even maker rate
 │   └── simulator.py     # zero-intelligence order flow
 ├── benchmark.py         # profiling: throughput vs depth, latency percentiles
-└── tests/               # 80 tests, written as matching scenarios
+└── tests/               # 88 tests, written as matching scenarios
 ```
 
 `tests/test_orderbook.py` is worth reading as the specification — each test is one rule of the
@@ -294,7 +295,9 @@ absolute nanoseconds.
 - No opening or closing auction — a large share of real daily volume trades in exactly those,
   under different rules (a single clearing price, not continuous matching).
 - ~~No self-trade prevention~~ - `participant_id` + `StpPolicy` on every order type (see Design
-  notes). Still no fee/rebate model, no other risk checks (position limits, fat-finger checks).
+  notes). ~~No fee/rebate model~~ - `src/fees.py`, charged in section 6b of RESULTS.md, where the
+  rebate turns out to be a fifth of the quoted edge. Still no other risk checks (position limits,
+  fat-finger checks).
 - ~~No latency~~ — `src/latency.py` puts messages on a wire and the book serves them in arrival
   order, not submission order. The simulator in sections 1-5 of RESULTS.md still runs with no
   latency at all, so those numbers describe a market where everyone is infinitely fast.
