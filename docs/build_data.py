@@ -21,6 +21,7 @@ from benchmark import (EagerCancelBook, ScanBook, latency_percentiles,
                        time_quotes, time_simulation, tombstone_census)
 import latency_study
 from run_simulation import N_EVENTS, SEED
+from src.fees import MAKER_TAKER, SCHEDULES, breakeven_maker_rate
 from src.order import Side
 from src.orderbook import LimitOrderBook
 from src.simulator import hurst_exponent, impact_exponent, seed_book, simulate
@@ -103,6 +104,14 @@ def main():
                 "toxic_share": round(m["toxic_share"], 4),
                 "passive_ticks": round(m["passive_ticks"], 3),
                 "active_ticks": round(m["active_ticks"], 3),
+                # same run, with each venue's fees charged on top
+                "net": {sched.name: round((m["trading_pnl"] + sched.net(
+                            m["passive_volume"], m["active_volume"]))
+                            / latency_study.TICK)
+                        for sched in SCHEDULES},
+                "breakeven": round(breakeven_maker_rate(
+                    m["trading_pnl"], m["passive_volume"], m["active_volume"],
+                    taker_fee=MAKER_TAKER.taker), 5),
             }
         races.append(row)
     latency = {
@@ -113,6 +122,8 @@ def main():
         "jump_ticks": latency_study.JUMP_TICKS,
         "taker_us": latency_study.TAKER_LATENCY_US,
         "races": races,
+        "schedules": [{"name": s.name, "maker": s.maker, "taker": s.taker}
+                      for s in SCHEDULES],
     }
 
     data = {
@@ -146,6 +157,10 @@ def main():
     par, gap = races[0], races[1]
     print(f"  latency: parity {par['fast']['pnl']:,} / {par['slow']['pnl']:,} ticks, "
           f"{gap['slow_us']:.0f}us {gap['fast']['pnl']:,} / {gap['slow']['pnl']:,}")
+    for row in races:
+        print(f"  fees at {row['slow_us']:>6.0f}us slow: " + " | ".join(
+            f"{name} {row['slow']['net'][name]:>8,}" for name in row["slow"]["net"])
+            + f" | break-even {row['slow']['breakeven']:+.4f}$")
 
 
 if __name__ == "__main__":

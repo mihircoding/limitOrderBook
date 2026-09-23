@@ -120,6 +120,7 @@ input[type=number]{padding:7px 10px;border:1px solid var(--line2);border-radius:
   <p class="lede">A price-time priority matching engine — the piece of infrastructure that <em>is</em> a modern exchange — plus a zero-intelligence order flow simulator to run through it. <strong style="color:var(--ink)">The agents have no strategy at all. The book still produces a realistic spread distribution, concave price impact, and a mid price that mean-reverts at short horizons exactly the way real tick data does.</strong> None of that was programmed in.</p>
   <div class="links">
     <a class="btn primary" href="#demo">Trade against the book</a>
+    <a class="btn" href="#fees">What the venue charges</a>
     <a class="btn" href="https://github.com/mihircoding/limitOrderBook">Source on GitHub</a>
     <a class="btn" href="https://github.com/mihircoding/limitOrderBook/blob/main/RESULTS.md">Full write-up</a>
   </div>
@@ -356,6 +357,42 @@ input[type=number]{padding:7px 10px;border:1px solid var(--line2);border-radius:
   </div>
 
   <p style="font-size:13.5px;color:var(--ink3)">Latency is one-way and outbound only: both makers see the jump instantly, and there is no gateway queueing, market-data delay or engine processing time. Co-location is bought mostly to see faster, and that half is missing. The makers also never adapt &mdash; a real slow maker would quote wider, so the slow column is what happens to one that doesn't.</p>
+</div>
+</section>
+
+<section id="fees">
+<div class="wrap">
+  <div class="eyebrow">Economics</div>
+  <h2>Nobody trades for free</h2>
+  <p class="lede">Every number above pays the exchange nothing. On a real venue the maker-taker schedule pays you to rest an order that gets filled and charges you to take one off the book &mdash; about <span class="mono">+$0.0020</span> and <span class="mono">&minus;$0.0030</span> a share at a top tier. These makers quote one tick, one cent, either side of fair value, so <strong style="color:var(--ink)">the rebate is a fifth of the entire edge they are working with.</strong></p>
+
+  <p><span class="mono">src/fees.py</span> charges it, at the two schedules that actually exist. Maker-taker subsidises quoting, which is why queues on those venues are long. An inverted venue does the opposite &mdash; it charges the maker and pays the taker, so it attracts aggressive flow, which is exactly the flow that knows something. A maker there is paying for the privilege of being adversely selected, and gets a shorter queue in exchange.</p>
+
+  <div class="grid2">
+    <div class="panel">
+      <h3>The slow maker's whole run, by venue</h3>
+      <div class="chart"><canvas id="c-fee-pnl"></canvas></div>
+      <p class="cap">Same races as above, with each schedule's fees charged. <span id="f-neg"></span></p>
+    </div>
+    <div class="panel">
+      <h3>What each maker can afford to pay</h3>
+      <div class="chart"><canvas id="c-fee-be"></canvas></div>
+      <p class="cap">The per-share maker rate at which that maker's run nets to exactly zero, against a 30-mil taker fee. Below the line is what it can afford to <em>pay</em> a venue; the dashed line is an inverted venue's $0.0010 maker fee.</p>
+    </div>
+  </div>
+
+  <div class="cards" style="margin-top:22px">
+    <div class="card"><div class="k">Rebate as a share of the quoted edge</div><div class="v" id="f-share">&mdash;</div><div class="s">$0.0020 against a one-cent quote</div></div>
+    <div class="card"><div class="k">Slow maker at 50&micro;s, per share</div><div class="v" id="f-perhsare">&mdash;</div><div class="s">what the trades themselves earn</div></div>
+    <div class="card"><div class="k">Same maker on an inverted venue</div><div class="v red" id="f-inv">&mdash;</div><div class="s">the fee is more than the strategy makes</div></div>
+  </div>
+
+  <div class="note">
+    <p><strong>Fees don't change who wins the race &mdash; they change whether the loser has a business.</strong> They are charged per share and both makers do similar volume, so the subsidy lands on both and the fast maker's advantage is the same with fees as without. But the slow maker's trading P&amp;L is thin enough that the venue's rate card decides its sign. <span id="f-summary"></span></p>
+    <p style="margin-top:10px">Which makes latency and venue choice the same decision. A slow maker belongs where quoting is subsidised. The fast one can afford to quote almost anywhere, which is precisely why it can go where the aggressive flow is.</p>
+  </div>
+
+  <p style="font-size:13.5px;color:var(--ink3)">Real rate cards are tiered by monthly volume and run to several pages; these are top-line numbers, not a quote. And a maker facing an inverted venue's fee would widen its quote rather than keep paying it &mdash; the fixed one-tick edge here doesn't let it.</p>
 </div>
 </section>
 
@@ -806,6 +843,61 @@ if (L) {
     type: 'bar',
     data: {labels, datasets: pair(null, m => m.toxic_share * 100)},
     options: latOpts('informed share of quoted volume', v => v + '%', v => v.toFixed(1) + '%')
+  });
+
+  // --- fees ---
+  const scheds = L.schedules, money = x => (x < 0 ? '\u2212$' : '$') + Math.abs(x).toFixed(4);
+  const fifty = races.find(r => r.slow_us === 50) || gap;
+  const inv = scheds.find(x => x.name === 'inverted');
+  const mt = scheds.find(x => x.name === 'maker-taker');
+
+  set('f-share', pct(mt.maker / 0.01, 0));
+  const perShare = fifty.slow.pnl * 0.01 / (fifty.slow.passive_volume + fifty.slow.active_volume);
+  set('f-perhsare', money(perShare));
+  set('f-inv', fifty.slow.net['inverted'].toLocaleString() + ' ticks');
+  set('f-neg', `At ${us(fifty.slow_us)} the inverted column is the only negative cell on this page.`);
+  set('f-summary', `At ${us(fifty.slow_us)} it earns ${money(perShare)} a share from trading. ` +
+    `Maker-taker turns ${fifty.slow.pnl.toLocaleString()} ticks into ${fifty.slow.net['maker-taker'].toLocaleString()}; ` +
+    `an inverted venue turns it into ${fifty.slow.net['inverted'].toLocaleString()}.`);
+
+  const feeColors = {'no fees': c.ink3, 'maker-taker': c.green, 'inverted': c.red};
+  new Chart(document.getElementById('c-fee-pnl'), {
+    type: 'bar',
+    data: {labels, datasets: scheds.map(sc => ({
+      label: sc.name, data: races.map(r => r.slow.net[sc.name]),
+      backgroundColor: feeColors[sc.name] || c.blue, borderRadius: 2}))},
+    options: latOpts('slow maker P&L (ticks)', v => (v / 1000) + 'k',
+                     v => v.toLocaleString() + ' ticks')
+  });
+
+  new Chart(document.getElementById('c-fee-be'), {
+    type: 'bar',
+    data: {labels, datasets: [
+      {label: `fast maker (${us(L.fast_us)})`, data: races.map(r => r.fast.breakeven * 10000),
+       backgroundColor: c.blue, borderRadius: 2},
+      {label: 'slow maker', data: races.map(r => r.slow.breakeven * 10000),
+       backgroundColor: c.amber, borderRadius: 2}
+    ]},
+    options: (() => {
+      const o = latOpts('break-even maker rate (mils/share)', v => v, v => v.toFixed(1) + ' mils');
+      o.scales.y.beginAtZero = false;
+      return o;
+    })(),
+    plugins: [{
+      id: 'invline',
+      afterDraw(chart) {
+        const {ctx, chartArea, scales} = chart;
+        const y = scales.y.getPixelForValue(inv.maker * 10000);
+        if (y < chartArea.top || y > chartArea.bottom) return;
+        ctx.save();
+        ctx.strokeStyle = c.red; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.moveTo(chartArea.left, y); ctx.lineTo(chartArea.right, y); ctx.stroke();
+        ctx.setLineDash([]); ctx.fillStyle = c.red; ctx.font = '600 11px Inter, sans-serif';
+        ctx.fillText('inverted venue charges ' + Math.abs(inv.maker * 10000).toFixed(0) + ' mils',
+                     chartArea.left + 6, y - 6);
+        ctx.restore();
+      }
+    }]
   });
 
   document.querySelector('#t-lat tbody').innerHTML = races.map(r => `
