@@ -1,3 +1,14 @@
+> **This project has moved.** The matching engine and its order-flow simulator
+> are now the `exchange/` half of
+> **[Market Simulation Stack](https://github.com/mihircoding/backtestingEngine)**,
+> where the backtester routes its orders into this book instead of pricing fills
+> with a formula. Full history came across; nothing here is lost. The write-up
+> that used to be this repository's RESULTS.md is at
+> [notes/exchange.md](https://github.com/mihircoding/backtestingEngine/blob/main/notes/exchange.md),
+> and the new cross-cutting result is in
+> [RESULTS.md](https://github.com/mihircoding/backtestingEngine/blob/main/RESULTS.md).
+> This copy is kept read-only so existing links keep working.
+
 # Limit Order Book & Matching Engine
 
 **[Live site &rarr;](https://mihircoding.github.io/limitOrderBook/)** — includes a browser port of the matching engine you can send orders to and watch price-time priority work.
